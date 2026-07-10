@@ -3,9 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.core.exporter import export_matches_csv, export_matches_json
-from src.core.models import SearchMatch
-
-EDIT_LIST_STATUSES = {"可用", "已导出"}
+from src.core.models import EDIT_LIST_STATUSES, SearchMatch
 
 
 def filter_edit_list_matches(matches: list[SearchMatch]) -> list[SearchMatch]:

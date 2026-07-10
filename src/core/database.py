@@ -5,10 +5,18 @@ import sqlite3
 from pathlib import Path
 from typing import Iterable
 
-from src.core.models import QuerySegment, SearchChunk, SearchMatch, TranscriptSegment, VideoInfo
+from src.core.models import (
+    MATCH_STATUSES,
+    MATCH_STATUS_PENDING,
+    QuerySegment,
+    SearchChunk,
+    SearchMatch,
+    TranscriptSegment,
+    VideoInfo,
+)
 from src.core.text_utils import tokenized_text
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class Database:
@@ -108,7 +116,7 @@ class Database:
                 entity_score REAL NOT NULL,
                 episode_score REAL NOT NULL,
                 final_score REAL NOT NULL,
-                user_status TEXT NOT NULL DEFAULT '待确认'
+                user_status TEXT NOT NULL DEFAULT '待定'
             );
             """
         )
@@ -132,6 +140,7 @@ class Database:
             self.conn.execute("ALTER TABLE videos ADD COLUMN transcript_source_fingerprint TEXT")
         if "chunks_fingerprint" not in columns:
             self.conn.execute("ALTER TABLE videos ADD COLUMN chunks_fingerprint TEXT")
+        self.conn.execute("UPDATE matches SET user_status=? WHERE user_status=?", (MATCH_STATUS_PENDING, "待确认"))
         self.conn.commit()
 
     def _init_fts(self) -> None:
@@ -392,12 +401,18 @@ class Database:
         return mapping
 
     def save_matches(self, run_id: int, matches: list[SearchMatch], query_id_by_index: dict[int, int]) -> None:
-        rows = []
         for match in matches:
-            rows.append(
+            query_segment_id = query_id_by_index.get(match.query_index)
+            cur = self.conn.execute(
+                """
+                INSERT INTO matches(run_id, query_segment_id, video_id, start_ms, end_ms,
+                    preview_start_ms, preview_end_ms, evidence_text, text_score, semantic_score,
+                    entity_score, episode_score, final_score, user_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
                 (
                     run_id,
-                    query_id_by_index.get(match.query_index),
+                    query_segment_id,
                     match.video_id,
                     match.start_ms,
                     match.end_ms,
@@ -409,15 +424,96 @@ class Database:
                     match.entity_score,
                     match.episode_score,
                     match.final_score,
-                )
+                    match.status,
+                ),
             )
+            match.match_id = int(cur.lastrowid)
+            match.run_id = run_id
+            match.query_segment_id = query_segment_id
+        self.conn.commit()
+
+    def update_match_statuses(self, match_ids: list[int], status: str) -> None:
+        if status not in MATCH_STATUSES:
+            raise ValueError(f"无效状态：{status}")
+        ids = [int(match_id) for match_id in match_ids if match_id is not None]
+        if not ids:
+            return
         self.conn.executemany(
-            """
-            INSERT INTO matches(run_id, query_segment_id, video_id, start_ms, end_ms,
-                preview_start_ms, preview_end_ms, evidence_text, text_score, semantic_score,
-                entity_score, episode_score, final_score)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
+            "UPDATE matches SET user_status=? WHERE id=?",
+            [(status, match_id) for match_id in ids],
         )
         self.conn.commit()
+
+    def get_latest_query_run(self, script_path: Path | None = None) -> sqlite3.Row | None:
+        if script_path is not None:
+            row = self.conn.execute(
+                "SELECT * FROM query_runs WHERE script_path=? ORDER BY id DESC LIMIT 1",
+                (str(script_path),),
+            ).fetchone()
+            if row is not None:
+                return row
+        return self.conn.execute("SELECT * FROM query_runs ORDER BY id DESC LIMIT 1").fetchone()
+
+    def load_matches_for_run(self, run_id: int) -> list[SearchMatch]:
+        rows = self.conn.execute(
+            """
+            SELECT
+                m.id AS match_id,
+                m.run_id,
+                m.query_segment_id,
+                m.user_status,
+                qs.segment_index,
+                qs.section_name,
+                qs.query_type,
+                qs.query_text,
+                v.id AS video_id,
+                v.path AS video_path,
+                v.filename AS video_filename,
+                v.episode_no,
+                m.start_ms,
+                m.end_ms,
+                m.preview_start_ms,
+                m.preview_end_ms,
+                m.evidence_text,
+                m.text_score,
+                m.semantic_score,
+                m.entity_score,
+                m.episode_score,
+                m.final_score
+            FROM matches m
+            JOIN query_segments qs ON qs.id = m.query_segment_id
+            JOIN videos v ON v.id = m.video_id
+            WHERE m.run_id = ?
+            ORDER BY qs.segment_index, m.final_score DESC, m.id
+            """,
+            (run_id,),
+        ).fetchall()
+        matches: list[SearchMatch] = []
+        for row in rows:
+            matches.append(
+                SearchMatch(
+                    query_index=int(row["segment_index"]),
+                    query_text=str(row["query_text"]),
+                    query_type=str(row["query_type"]),
+                    section=str(row["section_name"]),
+                    video_id=int(row["video_id"]),
+                    video_path=str(row["video_path"]),
+                    video_filename=str(row["video_filename"]),
+                    episode_no=int(row["episode_no"]) if row["episode_no"] is not None else None,
+                    start_ms=int(row["start_ms"]),
+                    end_ms=int(row["end_ms"]),
+                    preview_start_ms=int(row["preview_start_ms"]),
+                    preview_end_ms=int(row["preview_end_ms"]),
+                    evidence_text=str(row["evidence_text"]),
+                    text_score=float(row["text_score"]),
+                    semantic_score=float(row["semantic_score"]),
+                    entity_score=float(row["entity_score"]),
+                    episode_score=float(row["episode_score"]),
+                    final_score=float(row["final_score"]),
+                    status=str(row["user_status"] or MATCH_STATUS_PENDING),
+                    match_id=int(row["match_id"]),
+                    run_id=int(row["run_id"]),
+                    query_segment_id=int(row["query_segment_id"]) if row["query_segment_id"] is not None else None,
+                )
+            )
+        return matches

@@ -25,14 +25,15 @@ from PySide6.QtWidgets import (
 )
 
 from src.app.config import CONFIG
-from src.app.main import index_videos, scan_videos, search_script
+from src.app.main import index_videos, load_latest_search_results, scan_videos, search_script, update_search_match_statuses
 from src.core.clipper import export_clip, export_clips, open_match_preview
 from src.core.edit_list import export_editing_checklist
+from src.core.models import EDIT_LIST_STATUSES, MATCH_STATUS_BAD, MATCH_STATUS_EXPORTED, MATCH_STATUS_PENDING, MATCH_STATUS_USABLE, MATCH_STATUSES
 from src.core.thumbnailer import export_thumbnail, export_thumbnails
 from src.core.timecode import ms_to_timecode
 from src.core.text_utils import summarize
 
-STATUS_VALUES = ["待定", "可用", "不准", "已导出"]
+STATUS_VALUES = MATCH_STATUSES
 ALL_STATUS = "全部"
 
 
@@ -103,6 +104,7 @@ class MainWindow(QMainWindow):
         self.index_first_btn = QPushButton("先索引第1集测试")
         self.index_all_btn = QPushButton("全量索引")
         self.search_btn = QPushButton("搜索文案片段")
+        self.load_latest_btn = QPushButton("加载最近结果")
         self.preview_btn = QPushButton("预览选中片段")
         self.export_clip_btn = QPushButton("导出选中片段")
         self.export_selected_btn = QPushButton("批量导出选中")
@@ -111,6 +113,7 @@ class MainWindow(QMainWindow):
         self.index_first_btn.clicked.connect(lambda: self.index("1"))
         self.index_all_btn.clicked.connect(lambda: self.index("all"))
         self.search_btn.clicked.connect(self.search)
+        self.load_latest_btn.clicked.connect(self.load_latest_results)
         self.preview_btn.clicked.connect(self.preview_selected)
         self.export_clip_btn.clicked.connect(self.export_selected_clip)
         self.export_selected_btn.clicked.connect(self.export_selected_clips)
@@ -119,7 +122,7 @@ class MainWindow(QMainWindow):
         self.export_clip_btn.setEnabled(False)
         self.export_selected_btn.setEnabled(False)
         self.thumb_selected_btn.setEnabled(False)
-        for btn in [self.scan_btn, self.index_first_btn, self.index_all_btn, self.search_btn, self.preview_btn, self.export_clip_btn, self.export_selected_btn, self.thumb_selected_btn]:
+        for btn in [self.scan_btn, self.index_first_btn, self.index_all_btn, self.search_btn, self.load_latest_btn, self.preview_btn, self.export_clip_btn, self.export_selected_btn, self.thumb_selected_btn]:
             buttons.addWidget(btn)
         layout.addLayout(buttons)
 
@@ -133,9 +136,9 @@ class MainWindow(QMainWindow):
         self.export_usable_btn = QPushButton("导出可用片段")
         self.thumb_usable_btn = QPushButton("生成可用缩略图")
         self.export_checklist_btn = QPushButton("导出剪辑清单")
-        self.mark_pending_btn.clicked.connect(lambda: self.mark_selected_status("待定"))
-        self.mark_usable_btn.clicked.connect(lambda: self.mark_selected_status("可用"))
-        self.mark_bad_btn.clicked.connect(lambda: self.mark_selected_status("不准"))
+        self.mark_pending_btn.clicked.connect(lambda: self.mark_selected_status(MATCH_STATUS_PENDING))
+        self.mark_usable_btn.clicked.connect(lambda: self.mark_selected_status(MATCH_STATUS_USABLE))
+        self.mark_bad_btn.clicked.connect(lambda: self.mark_selected_status(MATCH_STATUS_BAD))
         self.export_usable_btn.clicked.connect(self.export_usable_clips)
         self.thumb_usable_btn.clicked.connect(self.export_usable_thumbnails)
         self.export_checklist_btn.clicked.connect(self.export_editing_checklist)
@@ -203,6 +206,20 @@ class MainWindow(QMainWindow):
             self._show_search_result((matches, csv_path, json_path))
         except Exception as exc:
             self._show_error(f"搜索失败：{exc}")
+
+    def load_latest_results(self) -> None:
+        if self.thread and self.thread.isRunning():
+            QMessageBox.warning(self, "任务进行中", "请等待当前任务完成。")
+            return
+        script_path = Path(self.script_edit.text()) if self.script_edit.text().strip() else None
+        try:
+            matches, run_id = load_latest_search_results(script_path)
+            if not matches:
+                QMessageBox.information(self, "没有历史结果", "没有找到可加载的历史搜索结果。")
+                return
+            self._show_loaded_result((matches, run_id))
+        except Exception as exc:
+            self._show_error(f"加载历史结果失败：{exc}")
 
     def _selected_match(self):
         row = self.result_table.currentRow()
@@ -280,13 +297,22 @@ class MainWindow(QMainWindow):
         matches = self._selected_matches()
         if not matches:
             return
+        match_ids = [match.match_id for match in matches if match.match_id is not None]
+        if len(match_ids) != len(matches):
+            QMessageBox.warning(self, "无法保存状态", "部分结果缺少数据库 ID，请重新搜索后再标记。")
+            return
+        try:
+            update_search_match_statuses(match_ids, status)
+        except Exception as exc:
+            self._show_error(f"保存状态失败：{exc}")
+            return
         for match in matches:
             match.status = status
         self.apply_status_filter()
-        self.log(f"已标记 {len(matches)} 条为：{status}")
+        self.log(f"已标记并保存 {len(matches)} 条为：{status}")
 
     def export_usable_clips(self) -> None:
-        matches = [match for match in self.current_matches if match.status == "可用"]
+        matches = [match for match in self.current_matches if match.status == MATCH_STATUS_USABLE]
         if not matches:
             QMessageBox.information(self, "没有可用片段", "请先把候选结果标记为“可用”。")
             return
@@ -303,7 +329,7 @@ class MainWindow(QMainWindow):
         )
 
     def export_usable_thumbnails(self) -> None:
-        matches = [match for match in self.current_matches if match.status in {"可用", "已导出"}]
+        matches = [match for match in self.current_matches if match.status in EDIT_LIST_STATUSES]
         if not matches:
             QMessageBox.information(self, "没有可用片段", "请先把候选结果标记为“可用”或导出片段。")
             return
@@ -322,8 +348,14 @@ class MainWindow(QMainWindow):
 
     def _after_export(self, paths, matches) -> None:
         for match, path in zip(matches, paths):
-            match.status = "已导出"
+            match.status = MATCH_STATUS_EXPORTED
             match.export_path = str(path)
+        match_ids = [match.match_id for match in matches if match.match_id is not None]
+        if match_ids:
+            try:
+                update_search_match_statuses(match_ids, MATCH_STATUS_EXPORTED)
+            except Exception as exc:
+                self._show_error(f"保存导出状态失败：{exc}")
         self.apply_status_filter()
         self.log(f"导出完成：{len(paths)} 个片段")
 
@@ -429,8 +461,12 @@ class MainWindow(QMainWindow):
         self.log(f"扫描完成：{len(rows)} 个视频")
 
     @Slot(object)
-    def _show_search_result(self, payload) -> None:
-        matches, csv_path, json_path = payload
+    def _show_loaded_result(self, payload) -> None:
+        matches, run_id = payload if isinstance(payload, tuple) else (payload, None)
+        self._populate_matches_table(matches)
+        self.log(f"已加载历史搜索结果：run_id={run_id or '?'} / {len(matches)} 条")
+
+    def _populate_matches_table(self, matches) -> None:
         self.current_matches = list(matches)
         self.result_table.setRowCount(0)
         self.result_table.setColumnCount(12)
@@ -456,7 +492,6 @@ class MainWindow(QMainWindow):
             ]
             for c, value in enumerate(values):
                 self.result_table.setItem(r, c, QTableWidgetItem(str(value)))
-        self.log(f"搜索完成：{len(matches)} 条候选。CSV: {csv_path} JSON: {json_path}")
         self.preview_btn.setEnabled(bool(self.current_matches))
         self.export_clip_btn.setEnabled(bool(self.current_matches))
         self.export_selected_btn.setEnabled(bool(self.current_matches))
@@ -464,6 +499,12 @@ class MainWindow(QMainWindow):
         for btn in [self.mark_pending_btn, self.mark_usable_btn, self.mark_bad_btn, self.export_usable_btn, self.thumb_usable_btn, self.export_checklist_btn]:
             btn.setEnabled(bool(self.current_matches))
         self.apply_status_filter()
+
+    @Slot(object)
+    def _show_search_result(self, payload) -> None:
+        matches, csv_path, json_path = payload
+        self._populate_matches_table(matches)
+        self.log(f"搜索完成：{len(matches)} 条候选。CSV: {csv_path} JSON: {json_path}")
 
     def closeEvent(self, event) -> None:
         if self.thread and self.thread.isRunning():

@@ -4,6 +4,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+MATCH_STATUS_PENDING = "待定"
+MATCH_STATUS_USABLE = "可用"
+MATCH_STATUS_BAD = "不准"
+MATCH_STATUS_EXPORTED = "已导出"
+MATCH_STATUSES = [MATCH_STATUS_PENDING, MATCH_STATUS_USABLE, MATCH_STATUS_BAD, MATCH_STATUS_EXPORTED]
+EDIT_LIST_STATUSES = {MATCH_STATUS_USABLE, MATCH_STATUS_EXPORTED}
+
 
 @dataclass(slots=True)
 class VideoInfo:
@@ -68,6 +75,9 @@ class SearchMatch:
     entity_score: float
     episode_score: float
     final_score: float
-    status: str = "待定"
+    status: str = MATCH_STATUS_PENDING
     export_path: str = ""
     thumbnail_path: str = ""
+    match_id: int | None = None
+    run_id: int | None = None
+    query_segment_id: int | None = None

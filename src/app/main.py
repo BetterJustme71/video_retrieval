@@ -10,6 +10,7 @@ from src.core.database import Database
 from src.core.exporter import export_matches_csv, export_matches_json
 from src.core.index_manager import rebuild_chunks_for_video
 from src.core.media_scanner import MediaScanner
+from src.core.models import MATCH_STATUS_USABLE, SearchMatch
 from src.core.retrieval_engine import RetrievalEngine
 from src.core.script_parser import ScriptParser
 from src.core.timecode import ms_to_timecode
@@ -96,6 +97,34 @@ def search_script(script_path: Path, top_k: int, config: AppConfig = CONFIG) -> 
         db.close()
 
 
+def load_search_results_by_run(run_id: int, config: AppConfig = CONFIG) -> list[SearchMatch]:
+    db = init_db(config)
+    try:
+        return db.load_matches_for_run(run_id)
+    finally:
+        db.close()
+
+
+def load_latest_search_results(script_path: Path | None = None, config: AppConfig = CONFIG) -> tuple[list[SearchMatch], int | None]:
+    db = init_db(config)
+    try:
+        row = db.get_latest_query_run(script_path)
+        if row is None:
+            return [], None
+        run_id = int(row["id"])
+        return db.load_matches_for_run(run_id), run_id
+    finally:
+        db.close()
+
+
+def update_search_match_statuses(match_ids: list[int], status: str, config: AppConfig = CONFIG) -> None:
+    db = init_db(config)
+    try:
+        db.update_match_statuses(match_ids, status)
+    finally:
+        db.close()
+
+
 def run_gui() -> int:
     from src.ui.main_window import run_app
 
@@ -117,6 +146,8 @@ def build_parser() -> argparse.ArgumentParser:
     search = sub.add_parser("search", help="搜索脚本文案")
     search.add_argument("--script", type=Path, default=CONFIG.default_script_path)
     search.add_argument("--top-k", type=int, default=5)
+    search.add_argument("--latest", action="store_true", help="加载当前文案最近一次搜索结果，不重新搜索")
+    search.add_argument("--run-id", type=int, help="加载指定 run_id 的历史搜索结果")
 
     clip = sub.add_parser("clip", help="搜索并导出前几条候选片段")
     clip.add_argument("--script", type=Path, default=CONFIG.default_script_path)
@@ -160,12 +191,19 @@ def main(argv: list[str] | None = None) -> int:
         index_videos(args.video_dir, parse_episodes(args.episodes), args.model)
         return 0
     if command == "search":
-        matches, csv_path, json_path = search_script(args.script, args.top_k)
-        print(f"得到 {len(matches)} 条候选结果")
-        print(f"CSV: {csv_path}")
-        print(f"JSON: {json_path}")
+        if args.run_id is not None:
+            matches = load_search_results_by_run(args.run_id)
+            print(f"加载 run_id={args.run_id} 的历史结果：{len(matches)} 条")
+        elif args.latest:
+            matches, run_id = load_latest_search_results(args.script)
+            print(f"加载最近历史结果：run_id={run_id or '?'} / {len(matches)} 条")
+        else:
+            matches, csv_path, json_path = search_script(args.script, args.top_k)
+            print(f"得到 {len(matches)} 条候选结果")
+            print(f"CSV: {csv_path}")
+            print(f"JSON: {json_path}")
         for match in matches[:20]:
-            print(f"[{match.final_score:.3f}] 第{match.episode_no or '?'}集 {ms_to_timecode(match.start_ms)}-{ms_to_timecode(match.end_ms)} {match.video_filename} :: {match.query_text[:40]}")
+            print(f"[{match.status}][{match.final_score:.3f}] 第{match.episode_no or '?'}集 {ms_to_timecode(match.start_ms)}-{ms_to_timecode(match.end_ms)} {match.video_filename} :: {match.query_text[:40]}")
         return 0
     if command == "clip":
         matches, _csv_path, _json_path = search_script(args.script, args.top_k)
@@ -177,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         matches, _csv_path, _json_path = search_script(args.script, args.top_k)
         selected = matches[: args.limit]
         for match in selected:
-            match.status = "可用"
+            match.status = MATCH_STATUS_USABLE
         csv_path, json_path = export_editing_checklist(selected, args.output_dir)
         print(f"剪辑清单 CSV: {csv_path}")
         print(f"剪辑清单 JSON: {json_path}")
