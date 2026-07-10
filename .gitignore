@@ -1,0 +1,31 @@
+# dist
+dist/
+dist_new/
+build/
+
+# cache & large data
+cache/
+data/app.db
+exports/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+
+# logs
+logs/
+
+# env
+.env
+venv/
+.venv/
+
+# huggingface cache
+.huggingface/
