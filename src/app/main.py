@@ -59,9 +59,9 @@ def index_videos(video_dir: Path, episodes: list[int] | None, model: str, config
                 progress=progress,
             )
             if transcript_result.reused:
-                progress(f"转写已复用：{path.name} / {transcript_result.segment_count} 段")
+                progress(f"字幕/转写已复用：{path.name} / {transcript_result.source} / {transcript_result.source_ref} / {transcript_result.segment_count} 段")
             else:
-                progress(f"转写已更新：{path.name} / {transcript_result.segment_count} 段 / {transcript_result.reason}")
+                progress(f"字幕/转写已更新：{path.name} / {transcript_result.source} / {transcript_result.reason} / {transcript_result.segment_count} 段")
             chunk_result = rebuild_chunks_for_video(
                 db,
                 video_id,

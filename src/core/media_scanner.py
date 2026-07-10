@@ -10,8 +10,10 @@ from typing import Any
 
 from src.core.models import VideoInfo
 from src.core.timecode import seconds_to_ms
+from src.core.transcript_providers import find_sidecar_subtitles
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".ts", ".m4v", ".webm", ".mpg", ".mpeg"}
+SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".vtt"}
 EPISODE_RE = re.compile(r"第\s*(\d+)\s*集")
 
 
@@ -105,7 +107,7 @@ class MediaScanner:
             mtime=stat.st_mtime,
             fingerprint=video_fingerprint(path, duration_ms),
             has_audio=bool(audio_streams) if probe else True,
-            has_subtitle=bool(subtitle_streams),
+            has_subtitle=bool(subtitle_streams) or bool(find_sidecar_subtitles(path)),
             video_streams=video_streams,
             audio_streams=audio_streams,
             subtitle_streams=subtitle_streams,

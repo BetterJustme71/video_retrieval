@@ -8,7 +8,7 @@ from typing import Iterable
 from src.core.models import QuerySegment, SearchChunk, SearchMatch, TranscriptSegment, VideoInfo
 from src.core.text_utils import tokenized_text
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class Database:
@@ -42,6 +42,9 @@ class Database:
                 mtime REAL NOT NULL,
                 fingerprint TEXT NOT NULL,
                 transcript_fingerprint TEXT,
+                transcript_source TEXT,
+                transcript_source_ref TEXT,
+                transcript_source_fingerprint TEXT,
                 chunks_fingerprint TEXT,
                 has_audio INTEGER NOT NULL,
                 has_subtitle INTEGER NOT NULL,
@@ -121,6 +124,12 @@ class Database:
         columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(videos)").fetchall()}
         if "transcript_fingerprint" not in columns:
             self.conn.execute("ALTER TABLE videos ADD COLUMN transcript_fingerprint TEXT")
+        if "transcript_source" not in columns:
+            self.conn.execute("ALTER TABLE videos ADD COLUMN transcript_source TEXT")
+        if "transcript_source_ref" not in columns:
+            self.conn.execute("ALTER TABLE videos ADD COLUMN transcript_source_ref TEXT")
+        if "transcript_source_fingerprint" not in columns:
+            self.conn.execute("ALTER TABLE videos ADD COLUMN transcript_source_fingerprint TEXT")
         if "chunks_fingerprint" not in columns:
             self.conn.execute("ALTER TABLE videos ADD COLUMN chunks_fingerprint TEXT")
         self.conn.commit()
@@ -200,16 +209,27 @@ class Database:
             row = self.conn.execute("SELECT COUNT(*) AS count FROM search_chunks WHERE video_id=?", (video_id,)).fetchone()
         return int(row["count"] if row is not None else 0)
 
-    def update_transcript_fingerprint(self, video_id: int, fingerprint: str | None) -> None:
+    def update_transcript_metadata(
+        self,
+        video_id: int,
+        source: str | None,
+        source_ref: str | None,
+        source_fingerprint: str | None,
+        transcript_fingerprint: str | None,
+    ) -> None:
         self.conn.execute(
             """
             UPDATE videos
-            SET transcript_fingerprint=?, chunks_fingerprint=NULL, updated_at=CURRENT_TIMESTAMP
+            SET transcript_source=?, transcript_source_ref=?, transcript_source_fingerprint=?,
+                transcript_fingerprint=?, chunks_fingerprint=NULL, asr_status=?, updated_at=CURRENT_TIMESTAMP
             WHERE id=?
             """,
-            (fingerprint, video_id),
+            (source, source_ref, source_fingerprint, transcript_fingerprint, source or "done", video_id),
         )
         self.conn.commit()
+
+    def update_transcript_fingerprint(self, video_id: int, fingerprint: str | None) -> None:
+        self.update_transcript_metadata(video_id, "asr", None, fingerprint, fingerprint)
 
     def update_chunks_fingerprint(self, video_id: int, fingerprint: str | None) -> None:
         self.conn.execute(
@@ -222,7 +242,8 @@ class Database:
         return list(
             self.conn.execute(
                 """
-                SELECT id, fingerprint, transcript_fingerprint, chunks_fingerprint
+                SELECT id, fingerprint, transcript_source, transcript_source_ref,
+                       transcript_source_fingerprint, transcript_fingerprint, chunks_fingerprint
                 FROM videos
                 WHERE id IN (SELECT DISTINCT video_id FROM search_chunks)
                 ORDER BY id
@@ -295,6 +316,9 @@ class Database:
                 """
                 SELECT c.*, v.path AS video_path, v.filename AS video_filename, v.episode_no, v.duration_ms,
                        v.fingerprint AS video_fingerprint,
+                       v.transcript_source AS transcript_source,
+                       v.transcript_source_ref AS transcript_source_ref,
+                       v.transcript_source_fingerprint AS transcript_source_fingerprint,
                        v.transcript_fingerprint AS transcript_fingerprint,
                        v.chunks_fingerprint AS chunks_fingerprint
                 FROM search_chunks c JOIN videos v ON v.id = c.video_id

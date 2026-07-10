@@ -6,6 +6,15 @@ from typing import Callable
 
 from src.core.database import Database
 from src.core.models import TranscriptSegment
+from src.core.transcript_providers import (
+    TranscriptCandidate,
+    TranscriptLoadResult,
+    asr_candidate,
+    choose_embedded_candidate,
+    choose_sidecar_candidate,
+    load_subtitle_candidate,
+    transcript_segments_fingerprint,
+)
 
 ProgressCallback = Callable[[str], None]
 
@@ -16,6 +25,10 @@ class TranscriptResult:
     reused: bool
     fingerprint: str
     reason: str
+    source: str
+    source_ref: str
+    source_fingerprint: str
+    transcript_fingerprint: str
 
 
 class Transcriber:
@@ -82,40 +95,138 @@ def ensure_transcript(
     if row is None:
         raise RuntimeError(f"视频记录不存在：{video_id}")
 
-    current_fingerprint = str(row["fingerprint"] or "")
-    transcript_fingerprint = row["transcript_fingerprint"]
-    has_transcript = db.transcript_exists(video_id)
+    candidates = _build_candidates(row, video_path, model_size, device, compute_type)
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            return _ensure_candidate_transcript(
+                db,
+                video_id,
+                video_path,
+                candidate,
+                model_size,
+                device,
+                compute_type,
+                force=force,
+                progress=progress,
+            )
+        except Exception as exc:
+            last_error = exc
+            if candidate.kind == "asr":
+                raise
+            progress(f"{candidate.display_name} 不可用，继续尝试下一来源：{exc}")
+    if last_error:
+        raise RuntimeError(f"无法生成字幕/转写：{last_error}") from last_error
+    raise RuntimeError("无法生成字幕/转写：没有可用来源")
 
-    if not force and has_transcript and transcript_fingerprint == current_fingerprint:
+
+def _build_candidates(row, video_path: Path, model_size: str, device: str, compute_type: str) -> list[TranscriptCandidate]:
+    video_fingerprint = str(row["fingerprint"] or "")
+    candidates: list[TranscriptCandidate] = []
+    sidecar = choose_sidecar_candidate(video_path, video_fingerprint)
+    if sidecar is not None:
+        candidates.append(sidecar)
+    embedded = choose_embedded_candidate(row)
+    if embedded is not None:
+        candidates.append(embedded)
+    candidates.append(asr_candidate(row, model_size, device, compute_type))
+    candidates.sort(key=lambda item: item.priority)
+    return candidates
+
+
+def _ensure_candidate_transcript(
+    db: Database,
+    video_id: int,
+    video_path: Path,
+    candidate: TranscriptCandidate,
+    model_size: str,
+    device: str,
+    compute_type: str,
+    force: bool,
+    progress: ProgressCallback,
+) -> TranscriptResult:
+    row = db.get_video(video_id)
+    if row is None:
+        raise RuntimeError(f"视频记录不存在：{video_id}")
+    has_transcript = db.transcript_exists(video_id)
+    current_transcript_fingerprint = row["transcript_fingerprint"]
+    source = row["transcript_source"]
+    source_fingerprint = row["transcript_source_fingerprint"]
+
+    if (
+        not force
+        and has_transcript
+        and source == candidate.kind
+        and source_fingerprint == candidate.source_fingerprint
+        and current_transcript_fingerprint
+    ):
         segment_count = len(db.load_segments(video_id))
-        progress(f"复用已有转写：{video_path.name} / {segment_count} 段")
+        progress(f"复用已有字幕/转写：{candidate.display_name} / {segment_count} 段")
         return TranscriptResult(
             segment_count=segment_count,
             reused=True,
-            fingerprint=current_fingerprint,
-            reason="fingerprint_match",
+            fingerprint=str(current_transcript_fingerprint),
+            reason="source_fingerprint_match",
+            source=candidate.kind,
+            source_ref=candidate.source_ref,
+            source_fingerprint=candidate.source_fingerprint,
+            transcript_fingerprint=str(current_transcript_fingerprint),
         )
 
     if force:
-        progress(f"强制重新转写：{video_path.name}")
         reason = "force"
     elif not has_transcript:
-        progress(f"未找到已有转写，开始转写：{video_path.name}")
         reason = "missing_transcript"
-    elif transcript_fingerprint is None:
-        progress(f"旧库转写缺少指纹，重新转写：{video_path.name}")
-        reason = "missing_fingerprint"
+    elif source is None or source_fingerprint is None:
+        reason = "missing_source_metadata"
+    elif source != candidate.kind:
+        reason = "source_changed"
     else:
-        progress(f"视频指纹变化，重新转写：{video_path.name}")
-        reason = "fingerprint_changed"
+        reason = "source_fingerprint_changed"
+    progress(f"生成字幕/转写：{candidate.display_name} / {reason}")
 
-    transcriber = Transcriber(model_size=model_size, device=device, compute_type=compute_type, progress=progress)
-    segments = transcriber.transcribe_video(video_id, video_path)
-    db.replace_transcript(video_id, segments)
-    db.update_transcript_fingerprint(video_id, current_fingerprint)
-    return TranscriptResult(
-        segment_count=len(segments),
-        reused=False,
-        fingerprint=current_fingerprint,
-        reason=reason,
+    load_result = _load_candidate(video_id, video_path, candidate, model_size, device, compute_type, progress)
+    db.replace_transcript(video_id, load_result.segments)
+    db.update_transcript_metadata(
+        video_id,
+        load_result.source,
+        load_result.source_ref,
+        load_result.source_fingerprint,
+        load_result.transcript_fingerprint,
     )
+    return TranscriptResult(
+        segment_count=len(load_result.segments),
+        reused=False,
+        fingerprint=load_result.transcript_fingerprint,
+        reason=reason,
+        source=load_result.source,
+        source_ref=load_result.source_ref,
+        source_fingerprint=load_result.source_fingerprint,
+        transcript_fingerprint=load_result.transcript_fingerprint,
+    )
+
+
+def _load_candidate(
+    video_id: int,
+    video_path: Path,
+    candidate: TranscriptCandidate,
+    model_size: str,
+    device: str,
+    compute_type: str,
+    progress: ProgressCallback,
+) -> TranscriptLoadResult:
+    if candidate.kind in {"sidecar", "embedded"}:
+        return load_subtitle_candidate(video_id, video_path, candidate)
+    if candidate.kind == "asr":
+        transcriber = Transcriber(model_size=model_size, device=device, compute_type=compute_type, progress=progress)
+        segments = transcriber.transcribe_video(video_id, video_path)
+        if not segments:
+            raise RuntimeError(f"ASR 未生成有效文本：{video_path.name}")
+        return TranscriptLoadResult(
+            segments=segments,
+            source=candidate.kind,
+            source_ref=candidate.source_ref,
+            source_fingerprint=candidate.source_fingerprint,
+            transcript_fingerprint=transcript_segments_fingerprint(segments),
+        )
+    raise RuntimeError(f"未知 transcript 来源：{candidate.kind}")
