@@ -105,6 +105,7 @@ class MainWindow(QMainWindow):
         self.index_all_btn = QPushButton("全量索引")
         self.search_btn = QPushButton("搜索文案片段")
         self.load_latest_btn = QPushButton("加载最近结果")
+        self.cancel_btn = QPushButton("取消任务")
         self.preview_btn = QPushButton("预览选中片段")
         self.export_clip_btn = QPushButton("导出选中片段")
         self.export_selected_btn = QPushButton("批量导出选中")
@@ -114,15 +115,17 @@ class MainWindow(QMainWindow):
         self.index_all_btn.clicked.connect(lambda: self.index("all"))
         self.search_btn.clicked.connect(self.search)
         self.load_latest_btn.clicked.connect(self.load_latest_results)
+        self.cancel_btn.clicked.connect(self.cancel_current_task)
         self.preview_btn.clicked.connect(self.preview_selected)
         self.export_clip_btn.clicked.connect(self.export_selected_clip)
         self.export_selected_btn.clicked.connect(self.export_selected_clips)
         self.thumb_selected_btn.clicked.connect(self.export_selected_thumbnails)
+        self.cancel_btn.setEnabled(False)
         self.preview_btn.setEnabled(False)
         self.export_clip_btn.setEnabled(False)
         self.export_selected_btn.setEnabled(False)
         self.thumb_selected_btn.setEnabled(False)
-        for btn in [self.scan_btn, self.index_first_btn, self.index_all_btn, self.search_btn, self.load_latest_btn, self.preview_btn, self.export_clip_btn, self.export_selected_btn, self.thumb_selected_btn]:
+        for btn in [self.scan_btn, self.index_first_btn, self.index_all_btn, self.search_btn, self.load_latest_btn, self.cancel_btn, self.preview_btn, self.export_clip_btn, self.export_selected_btn, self.thumb_selected_btn]:
             buttons.addWidget(btn)
         layout.addLayout(buttons)
 
@@ -192,7 +195,6 @@ class MainWindow(QMainWindow):
         )
 
     def search(self) -> None:
-        """搜索很快（仅数据库查询），不建新线程以防打包后兼容问题。"""
         if self.thread and self.thread.isRunning():
             QMessageBox.warning(self, "任务进行中", "请等待当前任务完成。")
             return
@@ -200,26 +202,34 @@ class MainWindow(QMainWindow):
         if not script_path.exists():
             self._show_error(f"脚本文案不存在：{script_path}")
             return
-        try:
-            self.log("正在搜索文案片段…")
-            matches, csv_path, json_path = search_script(script_path, self.top_k_spin.value())
-            self._show_search_result((matches, csv_path, json_path))
-        except Exception as exc:
-            self._show_error(f"搜索失败：{exc}")
+        self.log("正在搜索文案片段…")
+        self._start_worker(
+            search_script,
+            script_path,
+            self.top_k_spin.value(),
+            progress="signal",
+            on_result=self._show_search_result,
+        )
 
     def load_latest_results(self) -> None:
         if self.thread and self.thread.isRunning():
             QMessageBox.warning(self, "任务进行中", "请等待当前任务完成。")
             return
         script_path = Path(self.script_edit.text()) if self.script_edit.text().strip() else None
-        try:
-            matches, run_id = load_latest_search_results(script_path)
-            if not matches:
-                QMessageBox.information(self, "没有历史结果", "没有找到可加载的历史搜索结果。")
-                return
-            self._show_loaded_result((matches, run_id))
-        except Exception as exc:
-            self._show_error(f"加载历史结果失败：{exc}")
+        self.log("正在加载历史搜索结果…")
+        self._start_worker(
+            load_latest_search_results,
+            script_path,
+            on_result=self._show_loaded_result,
+        )
+
+    def cancel_current_task(self) -> None:
+        if self.thread and self.thread.isRunning():
+            self.thread.requestInterruption()
+            self.thread.quit()
+            self.log("已请求取消当前任务；正在执行的外部命令或模型任务可能需要自然结束。")
+        else:
+            self.log("当前没有正在运行的任务。")
 
     def _selected_match(self):
         row = self.result_table.currentRow()
@@ -412,8 +422,9 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, busy: bool) -> None:
         self.progress.setVisible(busy)
-        for btn in [self.scan_btn, self.index_first_btn, self.index_all_btn, self.search_btn]:
+        for btn in [self.scan_btn, self.index_first_btn, self.index_all_btn, self.search_btn, self.load_latest_btn]:
             btn.setEnabled(not busy)
+        self.cancel_btn.setEnabled(busy)
         self.top_k_spin.setEnabled(not busy)
         has_matches = bool(self.current_matches)
         self.preview_btn.setEnabled((not busy) and has_matches)
@@ -463,6 +474,10 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _show_loaded_result(self, payload) -> None:
         matches, run_id = payload if isinstance(payload, tuple) else (payload, None)
+        if not matches:
+            QMessageBox.information(self, "没有历史结果", "没有找到可加载的历史搜索结果。")
+            self.log("没有找到可加载的历史搜索结果。")
+            return
         self._populate_matches_table(matches)
         self.log(f"已加载历史搜索结果：run_id={run_id or '?'} / {len(matches)} 条")
 

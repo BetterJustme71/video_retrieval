@@ -78,18 +78,25 @@ def index_videos(video_dir: Path, episodes: list[int] | None, model: str, config
         db.close()
 
 
-def search_script(script_path: Path, top_k: int, config: AppConfig = CONFIG) -> list:
+def search_script(script_path: Path, top_k: int, config: AppConfig = CONFIG, progress=print) -> list:
+    progress = progress or (lambda _message: None)
     db = init_db(config)
     try:
+        progress("解析文案…")
         queries = ScriptParser(script_path).parse()
+        progress(f"文案段落：{len(queries)} 段")
         run_id = db.create_query_run(script_path, {"top_k": top_k, "query_count": len(queries)})
         query_id_by_index = db.save_query_segments(run_id, queries)
+        progress("初始化检索引擎…")
         engine = RetrievalEngine(db, config)
+        progress("执行检索…")
         matches = engine.search_queries(queries, top_k=top_k)
+        progress(f"保存结果：{len(matches)} 条候选")
         db.save_matches(run_id, matches, query_id_by_index)
         stamp = script_path.stem[:32].replace(" ", "_")
         csv_path = config.exports_dir / f"{stamp}_matches.csv"
         json_path = config.exports_dir / f"{stamp}_matches.json"
+        progress("导出 CSV/JSON…")
         export_matches_csv(matches, csv_path)
         export_matches_json(matches, json_path)
         return matches, csv_path, json_path
