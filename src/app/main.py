@@ -49,7 +49,7 @@ def index_videos(video_dir: Path, episodes: list[int] | None, model: str, config
             if row is None:
                 continue
             path = Path(row["path"])
-            ensure_transcript(
+            transcript_result = ensure_transcript(
                 db,
                 video_id,
                 path,
@@ -58,14 +58,21 @@ def index_videos(video_dir: Path, episodes: list[int] | None, model: str, config
                 compute_type=config.whisper_compute_type,
                 progress=progress,
             )
-            count = rebuild_chunks_for_video(
+            if transcript_result.reused:
+                progress(f"转写已复用：{path.name} / {transcript_result.segment_count} 段")
+            else:
+                progress(f"转写已更新：{path.name} / {transcript_result.segment_count} 段 / {transcript_result.reason}")
+            chunk_result = rebuild_chunks_for_video(
                 db,
                 video_id,
                 min_ms=config.chunk_min_ms,
                 max_ms=config.chunk_max_ms,
                 overlap_segments=config.chunk_overlap_segments,
             )
-            progress(f"已建立检索块：{path.name} / {count} 个")
+            if chunk_result.rebuilt:
+                progress(f"已重建检索块：{path.name} / {chunk_result.chunk_count} 个 / {chunk_result.reason}")
+            else:
+                progress(f"复用已有检索块：{path.name} / {chunk_result.chunk_count} 个")
     finally:
         db.close()
 

@@ -21,6 +21,7 @@ class EmbeddingIndex:
         self.model = None
         self.chunk_ids: list[int] = []
         self.embeddings: np.ndarray | None = None
+        self.cache_key: str | None = None
 
     def available(self) -> bool:
         try:
@@ -51,20 +52,49 @@ class EmbeddingIndex:
         self.chunk_ids = ids
         self.embeddings = np.asarray(vectors, dtype=np.float32)
 
-    def save(self, path: Path) -> None:
+    def save(self, path: Path, cache_key: str | None = None) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         if self.embeddings is None:
             return
+        self.cache_key = cache_key
         np.save(path.with_suffix(".npy"), self.embeddings)
-        path.with_suffix(".json").write_text(json.dumps({"chunk_ids": self.chunk_ids}, ensure_ascii=False), encoding="utf-8")
+        meta = {
+            "model_name": self.model_name,
+            "cache_key": cache_key,
+            "chunk_count": len(self.chunk_ids),
+            "chunk_ids": self.chunk_ids,
+        }
+        path.with_suffix(".json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
-    def load(self, path: Path) -> bool:
+    def load(
+        self,
+        path: Path,
+        cache_key: str | None = None,
+        chunk_ids: list[int] | None = None,
+    ) -> bool:
         npy = path.with_suffix(".npy")
         meta = path.with_suffix(".json")
         if not npy.exists() or not meta.exists():
             return False
-        self.embeddings = np.load(npy)
-        self.chunk_ids = json.loads(meta.read_text(encoding="utf-8"))["chunk_ids"]
+        try:
+            meta_data = json.loads(meta.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        cached_ids = [int(item) for item in meta_data.get("chunk_ids", [])]
+        if meta_data.get("model_name") != self.model_name:
+            return False
+        if cache_key is not None and meta_data.get("cache_key") != cache_key:
+            return False
+        if chunk_ids is not None and cached_ids != chunk_ids:
+            return False
+        if int(meta_data.get("chunk_count", len(cached_ids))) != len(cached_ids):
+            return False
+        embeddings = np.load(npy)
+        if len(cached_ids) != len(embeddings):
+            return False
+        self.embeddings = embeddings
+        self.chunk_ids = cached_ids
+        self.cache_key = meta_data.get("cache_key")
         return True
 
     def score_query(self, query: str) -> dict[int, float]:

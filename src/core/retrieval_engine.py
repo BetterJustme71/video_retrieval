@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import hashlib
+import json
 
 from src.app.config import AppConfig
 from src.core.database import Database
@@ -23,11 +25,33 @@ class RetrievalEngine:
         chunks = self.db.list_chunks()
         if not chunks:
             return
-        cache_path = self.config.cache_dir / "index" / "chunks"
-        if self.embedding_index.load(cache_path):
+        cache_key = self._embedding_cache_key(chunks)
+        chunk_ids = [int(chunk["id"]) for chunk in chunks]
+        cache_path = self.config.cache_dir / "index" / f"chunks_{cache_key}"
+        if self.embedding_index.load(cache_path, cache_key=cache_key, chunk_ids=chunk_ids):
             return
         self.embedding_index.build(chunks)
-        self.embedding_index.save(cache_path)
+        self.embedding_index.save(cache_path, cache_key=cache_key)
+
+    def _embedding_cache_key(self, chunks) -> str:
+        rows = self.db.chunk_fingerprint_rows()
+        payload = {
+            "version": 1,
+            "model_name": self.config.embedding_model,
+            "chunk_count": len(chunks),
+            "chunk_ids": [int(chunk["id"]) for chunk in chunks],
+            "videos": [
+                {
+                    "id": int(row["id"]),
+                    "fingerprint": row["fingerprint"],
+                    "transcript_fingerprint": row["transcript_fingerprint"],
+                    "chunks_fingerprint": row["chunks_fingerprint"],
+                }
+                for row in rows
+            ],
+        }
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
     def search_queries(self, queries: list[QuerySegment], top_k: int = 5) -> list[SearchMatch]:
         all_matches: list[SearchMatch] = []

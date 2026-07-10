@@ -8,7 +8,7 @@ from typing import Iterable
 from src.core.models import QuerySegment, SearchChunk, SearchMatch, TranscriptSegment, VideoInfo
 from src.core.text_utils import tokenized_text
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class Database:
@@ -41,6 +41,8 @@ class Database:
                 size_bytes INTEGER NOT NULL,
                 mtime REAL NOT NULL,
                 fingerprint TEXT NOT NULL,
+                transcript_fingerprint TEXT,
+                chunks_fingerprint TEXT,
                 has_audio INTEGER NOT NULL,
                 has_subtitle INTEGER NOT NULL,
                 video_streams_json TEXT NOT NULL,
@@ -107,11 +109,20 @@ class Database:
             );
             """
         )
+        self._migrate_schema()
         self._init_fts()
         self.conn.execute(
             "INSERT OR REPLACE INTO app_meta(key, value) VALUES('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
+        self.conn.commit()
+
+    def _migrate_schema(self) -> None:
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(videos)").fetchall()}
+        if "transcript_fingerprint" not in columns:
+            self.conn.execute("ALTER TABLE videos ADD COLUMN transcript_fingerprint TEXT")
+        if "chunks_fingerprint" not in columns:
+            self.conn.execute("ALTER TABLE videos ADD COLUMN chunks_fingerprint TEXT")
         self.conn.commit()
 
     def _init_fts(self) -> None:
@@ -182,7 +193,47 @@ class Database:
         ).fetchone()
         return row is not None
 
+    def count_chunks(self, video_id: int | None = None) -> int:
+        if video_id is None:
+            row = self.conn.execute("SELECT COUNT(*) AS count FROM search_chunks").fetchone()
+        else:
+            row = self.conn.execute("SELECT COUNT(*) AS count FROM search_chunks WHERE video_id=?", (video_id,)).fetchone()
+        return int(row["count"] if row is not None else 0)
+
+    def update_transcript_fingerprint(self, video_id: int, fingerprint: str | None) -> None:
+        self.conn.execute(
+            """
+            UPDATE videos
+            SET transcript_fingerprint=?, chunks_fingerprint=NULL, updated_at=CURRENT_TIMESTAMP
+            WHERE id=?
+            """,
+            (fingerprint, video_id),
+        )
+        self.conn.commit()
+
+    def update_chunks_fingerprint(self, video_id: int, fingerprint: str | None) -> None:
+        self.conn.execute(
+            "UPDATE videos SET chunks_fingerprint=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (fingerprint, video_id),
+        )
+        self.conn.commit()
+
+    def chunk_fingerprint_rows(self) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT id, fingerprint, transcript_fingerprint, chunks_fingerprint
+                FROM videos
+                WHERE id IN (SELECT DISTINCT video_id FROM search_chunks)
+                ORDER BY id
+                """
+            ).fetchall()
+        )
+
     def replace_transcript(self, video_id: int, segments: Iterable[TranscriptSegment]) -> None:
+        old_ids = [r["id"] for r in self.conn.execute("SELECT id FROM search_chunks WHERE video_id=?", (video_id,)).fetchall()]
+        if old_ids:
+            self.conn.executemany("DELETE FROM search_chunks_fts WHERE rowid=?", [(i,) for i in old_ids])
         self.conn.execute("DELETE FROM transcript_segments WHERE video_id=?", (video_id,))
         self.conn.execute("DELETE FROM search_chunks WHERE video_id=?", (video_id,))
         rows = []
@@ -196,7 +247,10 @@ class Database:
             """,
             rows,
         )
-        self.conn.execute("UPDATE videos SET asr_status='done', updated_at=CURRENT_TIMESTAMP WHERE id=?", (video_id,))
+        self.conn.execute(
+            "UPDATE videos SET asr_status='done', chunks_fingerprint=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (video_id,),
+        )
         self.conn.commit()
 
     def load_segments(self, video_id: int) -> list[sqlite3.Row]:
@@ -239,7 +293,10 @@ class Database:
         return list(
             self.conn.execute(
                 """
-                SELECT c.*, v.path AS video_path, v.filename AS video_filename, v.episode_no, v.duration_ms
+                SELECT c.*, v.path AS video_path, v.filename AS video_filename, v.episode_no, v.duration_ms,
+                       v.fingerprint AS video_fingerprint,
+                       v.transcript_fingerprint AS transcript_fingerprint,
+                       v.chunks_fingerprint AS chunks_fingerprint
                 FROM search_chunks c JOIN videos v ON v.id = c.video_id
                 ORDER BY v.episode_no IS NULL, v.episode_no, c.start_ms
                 """
@@ -264,6 +321,9 @@ class Database:
                 rows = self.conn.execute(
                     """
                     SELECT c.*, v.path AS video_path, v.filename AS video_filename, v.episode_no, v.duration_ms,
+                           v.fingerprint AS video_fingerprint,
+                           v.transcript_fingerprint AS transcript_fingerprint,
+                           v.chunks_fingerprint AS chunks_fingerprint,
                            bm25(search_chunks_fts) AS rank
                     FROM search_chunks_fts
                     JOIN search_chunks c ON c.id = search_chunks_fts.rowid
