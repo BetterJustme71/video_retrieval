@@ -79,8 +79,8 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(root)
 
         path_grid = QGridLayout()
-        self.video_dir_edit = QLineEdit(str(CONFIG.default_video_dir))
-        self.script_edit = QLineEdit(str(CONFIG.default_script_path))
+        self.video_dir_edit = QLineEdit(str(CONFIG.get_default_video_dir()))
+        self.script_edit = QLineEdit(str(CONFIG.get_default_script_path()))
         video_btn = QPushButton("选择视频目录")
         script_btn = QPushButton("选择文案")
         video_btn.clicked.connect(self.choose_video_dir)
@@ -174,16 +174,23 @@ class MainWindow(QMainWindow):
         selected = QFileDialog.getExistingDirectory(self, "选择视频目录", self.video_dir_edit.text())
         if selected:
             self.video_dir_edit.setText(selected)
+            CONFIG.save_recent_paths(video_dir=Path(selected), script_path=Path(self.script_edit.text()))
 
     def choose_script(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(self, "选择脚本文案", self.script_edit.text(), "Markdown/Text (*.md *.txt);;All Files (*)")
         if selected:
             self.script_edit.setText(selected)
+            CONFIG.save_recent_paths(video_dir=Path(self.video_dir_edit.text()), script_path=Path(selected))
+
+    def _save_current_paths(self) -> None:
+        CONFIG.save_recent_paths(video_dir=Path(self.video_dir_edit.text()), script_path=Path(self.script_edit.text()))
 
     def scan(self) -> None:
+        self._save_current_paths()
         self._start_worker(scan_videos, Path(self.video_dir_edit.text()), on_result=self._show_scan_result)
 
     def index(self, episodes_value: str) -> None:
+        self._save_current_paths()
         episodes = None if episodes_value == "all" else [int(episodes_value)]
         self._start_worker(
             index_videos,
@@ -202,6 +209,7 @@ class MainWindow(QMainWindow):
         if not script_path.exists():
             self._show_error(f"脚本文案不存在：{script_path}")
             return
+        self._save_current_paths()
         self.log("正在搜索文案片段…")
         self._start_worker(
             search_script,
@@ -216,6 +224,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "任务进行中", "请等待当前任务完成。")
             return
         script_path = Path(self.script_edit.text()) if self.script_edit.text().strip() else None
+        self._save_current_paths()
         self.log("正在加载历史搜索结果…")
         self._start_worker(
             load_latest_search_results,

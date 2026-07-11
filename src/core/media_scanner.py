@@ -14,7 +14,11 @@ from src.core.transcript_providers import find_sidecar_subtitles
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".ts", ".m4v", ".webm", ".mpg", ".mpeg"}
 SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".vtt"}
-EPISODE_RE = re.compile(r"第\s*(\d+)\s*集")
+EPISODE_PATTERNS = [
+    re.compile(r"第\s*(\d{1,3})\s*[集话]"),
+    re.compile(r"(?:^|[^A-Za-z0-9])E(?:P)?\s*(\d{1,3})(?:[^A-Za-z0-9]|$)", re.IGNORECASE),
+    re.compile(r"(?:^|[^0-9])(\d{1,3})\s*[集话]"),
+]
 
 
 class FFprobeNotFoundError(RuntimeError):
@@ -28,9 +32,10 @@ def normalize_filename(filename: str) -> str:
 
 
 def extract_episode_no(filename: str) -> int | None:
-    match = EPISODE_RE.search(filename)
-    if match:
-        return int(match.group(1))
+    for pattern in EPISODE_PATTERNS:
+        match = pattern.search(filename)
+        if match:
+            return int(match.group(1))
     return None
 
 
@@ -61,17 +66,19 @@ def run_ffprobe(path: Path) -> dict[str, Any]:
 
 
 class MediaScanner:
-    def __init__(self, video_dir: Path):
+    def __init__(self, video_dir: Path, recursive: bool = True):
         self.video_dir = Path(video_dir)
+        self.recursive = recursive
 
     def scan(self, probe: bool = True) -> list[VideoInfo]:
         if not self.video_dir.exists():
             raise FileNotFoundError(f"视频目录不存在：{self.video_dir}")
         if not self.video_dir.is_dir():
             raise NotADirectoryError(f"不是视频目录：{self.video_dir}")
-        paths = [p for p in self.video_dir.iterdir() if p.is_file() and p.suffix.lower().strip() in VIDEO_EXTENSIONS]
+        iterator = self.video_dir.rglob("*") if self.recursive else self.video_dir.iterdir()
+        paths = [p for p in iterator if p.is_file() and p.suffix.lower().strip() in VIDEO_EXTENSIONS]
         infos = [self._build_info(path, probe=probe) for path in paths]
-        infos.sort(key=lambda info: (info.episode_no is None, info.episode_no or 10**9, info.normalized_filename))
+        infos.sort(key=lambda info: (info.episode_no is None, info.episode_no or 10**9, info.normalized_filename, str(info.path)))
         return infos
 
     def _build_info(self, path: Path, probe: bool) -> VideoInfo:

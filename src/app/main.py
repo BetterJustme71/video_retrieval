@@ -25,10 +25,10 @@ def init_db(config: AppConfig = CONFIG) -> Database:
     return db
 
 
-def scan_videos(video_dir: Path, config: AppConfig = CONFIG) -> list:
+def scan_videos(video_dir: Path, config: AppConfig = CONFIG, recursive: bool = True) -> list:
     db = init_db(config)
     try:
-        infos = MediaScanner(video_dir).scan(probe=True)
+        infos = MediaScanner(video_dir, recursive=recursive).scan(probe=True)
         for info in infos:
             db.upsert_video(info)
         return db.list_videos()
@@ -36,10 +36,10 @@ def scan_videos(video_dir: Path, config: AppConfig = CONFIG) -> list:
         db.close()
 
 
-def index_videos(video_dir: Path, episodes: list[int] | None, model: str, config: AppConfig = CONFIG, progress=print) -> None:
+def index_videos(video_dir: Path, episodes: list[int] | None, model: str, config: AppConfig = CONFIG, progress=print, recursive: bool = True) -> None:
     db = init_db(config)
     try:
-        infos = MediaScanner(video_dir).scan(probe=True)
+        infos = MediaScanner(video_dir, recursive=recursive).scan(probe=True)
         video_ids: list[int] = []
         for info in infos:
             video_id = db.upsert_video(info)
@@ -144,11 +144,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     scan = sub.add_parser("scan", help="扫描视频目录")
     scan.add_argument("--video-dir", type=Path, default=CONFIG.default_video_dir)
+    scan.add_argument("--no-recursive", action="store_true", help="只扫描视频目录第一层")
 
     index = sub.add_parser("index", help="转写并索引视频")
     index.add_argument("--video-dir", type=Path, default=CONFIG.default_video_dir)
     index.add_argument("--episodes", type=str, default="1", help="逗号分隔集数；all 表示全量")
     index.add_argument("--model", type=str, default=CONFIG.whisper_model)
+    index.add_argument("--no-recursive", action="store_true", help="只扫描视频目录第一层")
 
     search = sub.add_parser("search", help="搜索脚本文案")
     search.add_argument("--script", type=Path, default=CONFIG.default_script_path)
@@ -189,13 +191,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     command = args.command or "gui"
     if command == "scan":
-        rows = scan_videos(args.video_dir)
+        rows = scan_videos(args.video_dir, recursive=not args.no_recursive)
         print(f"扫描到 {len(rows)} 个视频：")
         for row in rows:
             print(f"第{row['episode_no'] or '?'}集\t{ms_to_timecode(row['duration_ms'])}\t{row['filename']}\t字幕:{'是' if row['has_subtitle'] else '否'}")
         return 0
     if command == "index":
-        index_videos(args.video_dir, parse_episodes(args.episodes), args.model)
+        index_videos(args.video_dir, parse_episodes(args.episodes), args.model, recursive=not args.no_recursive)
         return 0
     if command == "search":
         if args.run_id is not None:

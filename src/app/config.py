@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 def _detect_root() -> Path:
@@ -49,6 +51,10 @@ class AppConfig:
         "闯关东", "山东", "东北", "山海关", "离乡", "活路", "饥荒", "逃荒",
     ])
 
+    @property
+    def settings_path(self) -> Path:
+        return self.data_dir / "settings.json"
+
     def ensure_dirs(self) -> None:
         for path in [self.data_dir, self.cache_dir, self.exports_dir, self.logs_dir]:
             path.mkdir(parents=True, exist_ok=True)
@@ -59,6 +65,47 @@ class AppConfig:
         # Copy an existing database from the source project directory
         # so the packaged EXE finds the already-indexed data on first run.
         _try_copy_legacy_db(self.db_path)
+
+    def load_user_settings(self) -> dict[str, Any]:
+        try:
+            if not self.settings_path.exists():
+                return {}
+            data = json.loads(self.settings_path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def save_user_settings(self, settings: dict[str, Any]) -> None:
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def get_default_video_dir(self) -> Path:
+        value = self.load_user_settings().get("video_dir")
+        if value:
+            path = Path(str(value))
+            if path.exists() and path.is_dir():
+                return path
+        return self.default_video_dir
+
+    def get_default_script_path(self) -> Path:
+        value = self.load_user_settings().get("script_path")
+        if value:
+            path = Path(str(value))
+            if path.exists() and path.is_file():
+                return path
+        return self.default_script_path
+
+    def save_recent_paths(self, video_dir: Path | None = None, script_path: Path | None = None) -> None:
+        settings = self.load_user_settings()
+        if video_dir is not None:
+            video_dir = Path(video_dir)
+            if video_dir.exists() and video_dir.is_dir():
+                settings["video_dir"] = str(video_dir)
+        if script_path is not None:
+            script_path = Path(script_path)
+            if script_path.exists() and script_path.is_file():
+                settings["script_path"] = str(script_path)
+        self.save_user_settings(settings)
 
 
 def _try_copy_legacy_db(target: Path) -> None:
