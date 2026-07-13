@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from src.core.models import SearchMatch
-from src.core.subtitle import generate_srt, save_srt
+from src.core.subtitle import generate_srt, save_srt, segment_durations
 from src.core.timecode import ms_to_timecode
 
 ProgressCallback = Callable[[str], None]
@@ -110,13 +110,13 @@ def assemble_clips(
     clips_dir = output_dir / f"{name}_clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
     clip_paths: list[Path] = []
-    total_duration_ms = 0
+    durations = segment_durations(segments)
+    total_duration_ms = sum(durations)
     for idx, (match, text) in enumerate(segments):
-        seg_duration = max(1000, (match.preview_end_ms or match.end_ms) - (match.preview_start_ms or match.start_ms))
+        seg_duration = durations[idx]
         clip_name = f"Q{idx:03d}.mp4"
         clip_path = clips_dir / clip_name
         start_ms = match.preview_start_ms if match.preview_start_ms else match.start_ms
-        end_ms = match.preview_end_ms if match.preview_end_ms else match.end_ms
         cmd = [
             ffmpeg,
             "-y",
@@ -125,9 +125,7 @@ def assemble_clips(
             "-i",
             str(Path(match.video_path)),
             "-t",
-            ffmpeg_time(max(1000, end_ms - start_ms)),
-            "-map",
-            "0",
+            ffmpeg_time(seg_duration),
             "-c",
             "copy",
             "-avoid_negative_ts",
@@ -146,7 +144,7 @@ def assemble_clips(
                 "-i",
                 str(Path(match.video_path)),
                 "-t",
-                ffmpeg_time(max(1000, end_ms - start_ms)),
+                ffmpeg_time(seg_duration),
                 "-c:v",
                 "libx264",
                 "-preset",
@@ -163,7 +161,6 @@ def assemble_clips(
             if completed.returncode != 0:
                 raise RuntimeError(f"截取失败：{clip_name} {completed.stderr.strip()}")
         clip_paths.append(clip_path)
-        total_duration_ms += seg_duration
     concat_txt = output_dir / f"{name}_concat.txt"
     concat_txt.write_text("\n".join(f"file '{p.resolve()}'" for p in clip_paths), encoding="utf-8")
     video_path = output_dir / f"{name}.mp4"

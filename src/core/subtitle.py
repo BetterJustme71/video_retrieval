@@ -15,13 +15,19 @@ def ms_to_ts(ms: int) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{millis:03d}"
 
 
+def text_duration_ms(text: str) -> int:
+    """估算文案阅读时长：每字约 280ms，最短 2 秒，最长 15 秒。"""
+    raw = text.strip()
+    char_count = len(raw)
+    calculated = int(char_count * 280)
+    return max(2000, min(15000, calculated))
+
+
 def generate_srt(segments: list[tuple[SearchMatch, str]]) -> str:
     offset = 0
     parts: list[str] = []
-    for idx, (match, text) in enumerate(segments, start=1):
-        start_ms = match.start_ms if match.start_ms is not None else 0
-        end_ms = match.end_ms if match.end_ms is not None else start_ms
-        duration = max(500, end_ms - start_ms)
+    for idx, (_match, text) in enumerate(segments, start=1):
+        duration = text_duration_ms(text)
         seg_start = offset
         seg_end = offset + duration
         parts.append(
@@ -34,6 +40,11 @@ def generate_srt(segments: list[tuple[SearchMatch, str]]) -> str:
         )
         offset += duration
     return "".join(parts)
+
+
+def segment_durations(segments: list[tuple[SearchMatch, str]]) -> list[int]:
+    """返回每段文案对应的显示时长（毫秒），供截取视频时对齐使用。"""
+    return [text_duration_ms(text) for _match, text in segments]
 
 
 def save_srt(srt_text: str, path: Path) -> Path:
