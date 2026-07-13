@@ -4,6 +4,8 @@ import argparse
 from pathlib import Path
 
 from src.app.config import CONFIG, AppConfig
+from src.core.assembler import assemble_clips, burn_subtitle
+from src.core.best_match import pick_best_matches
 from src.core.clipper import export_clip
 from src.core.edit_list import export_editing_checklist
 from src.core.database import Database
@@ -16,6 +18,9 @@ from src.core.script_parser import ScriptParser
 from src.core.timecode import ms_to_timecode
 from src.core.thumbnailer import export_thumbnail
 from src.core.transcriber import ensure_transcript
+from src.app.config import CONFIG, AppConfig
+from src.core.assembler import assemble_clips, burn_subtitle
+from src.core.best_match import pick_best_matches
 
 
 def init_db(config: AppConfig = CONFIG) -> Database:
@@ -177,6 +182,19 @@ def build_parser() -> argparse.ArgumentParser:
     thumbnail.add_argument("--output-dir", type=Path, default=CONFIG.exports_dir / "thumbnails")
 
     sub.add_parser("gui", help="启动桌面界面")
+
+    assemble = sub.add_parser("assemble", help="搜索并组装最佳匹配片段为连贯视频+字幕")
+    assemble.add_argument("--script", type=Path, default=None, help="脚本文案路径（与 --run-id 二选一）")
+    assemble.add_argument("--top-k", type=int, default=5, help="每段候选数")
+    assemble.add_argument("--run-id", type=int, default=None, help="使用已有搜索结果 run_id（不用重新搜索）")
+    assemble.add_argument("--output-dir", type=Path, default=CONFIG.exports_dir / "assemblies", help="输出目录")
+    assemble.add_argument("--name", type=str, default="assembled", help="输出文件名前缀")
+
+    burn = sub.add_parser("burn-subtitle", help="将字幕文件烧录到视频中")
+    burn.add_argument("--video", type=Path, required=True, help="视频文件路径")
+    burn.add_argument("--srt", type=Path, required=True, help="字幕 .srt 文件路径")
+    burn.add_argument("--output", type=Path, default=None, help="输出视频路径（默认在视频同目录加 _subtitled 后缀）")
+
     return parser
 
 
@@ -237,5 +255,28 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if command == "gui":
         return run_gui()
+    if command == "assemble":
+        if args.run_id is not None:
+            matches = load_search_results_by_run(args.run_id)
+        elif args.script is not None:
+            matches, _csv, _json = search_script(args.script, args.top_k)
+        else:
+            print("请指定 --script 或 --run-id")
+            return 1
+        queries = None
+        segments = pick_best_matches(matches, queries)
+        if not segments:
+            print("没有足够的最佳匹配，无法组装。")
+            return 1
+        result = assemble_clips(segments, args.output_dir, args.name, progress=print)
+        print(f"组装完成：{result['video_path']}")
+        print(f"字幕文件：{result['srt_path']}")
+        print(f"片段数：{result['clip_count']}，总时长：{result['duration_ms']}ms")
+        return 0
+    if command == "burn_subtitle" or command == "burn-subtitle":
+        output_path = args.output or args.video.with_stem(args.video.stem + "_subtitled")
+        output = burn_subtitle(args.video, args.srt, output_path, progress=print)
+        print(f"烧录完成：{output}")
+        return 0
     parser.print_help()
     return 1

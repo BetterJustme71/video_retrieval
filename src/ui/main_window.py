@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
 
 from src.app.config import CONFIG
 from src.app.main import index_videos, load_latest_search_results, scan_videos, search_script, update_search_match_statuses
+from src.core.assembler import assemble_clips
+from src.core.best_match import pick_best_matches
 from src.core.clipper import export_clip, export_clips, open_match_preview
 from src.core.edit_list import export_editing_checklist
 from src.core.models import EDIT_LIST_STATUSES, MATCH_STATUS_BAD, MATCH_STATUS_EXPORTED, MATCH_STATUS_PENDING, MATCH_STATUS_USABLE, MATCH_STATUSES
@@ -110,6 +112,7 @@ class MainWindow(QMainWindow):
         self.export_clip_btn = QPushButton("导出选中片段")
         self.export_selected_btn = QPushButton("批量导出选中")
         self.thumb_selected_btn = QPushButton("生成选中缩略图")
+        self.assemble_btn = QPushButton("一键拼接视频")
         self.scan_btn.clicked.connect(self.scan)
         self.index_first_btn.clicked.connect(lambda: self.index("1"))
         self.index_all_btn.clicked.connect(lambda: self.index("all"))
@@ -120,12 +123,14 @@ class MainWindow(QMainWindow):
         self.export_clip_btn.clicked.connect(self.export_selected_clip)
         self.export_selected_btn.clicked.connect(self.export_selected_clips)
         self.thumb_selected_btn.clicked.connect(self.export_selected_thumbnails)
+        self.assemble_btn.clicked.connect(self.assemble_video)
+        self.assemble_btn.setEnabled(False)
         self.cancel_btn.setEnabled(False)
         self.preview_btn.setEnabled(False)
         self.export_clip_btn.setEnabled(False)
         self.export_selected_btn.setEnabled(False)
         self.thumb_selected_btn.setEnabled(False)
-        for btn in [self.scan_btn, self.index_first_btn, self.index_all_btn, self.search_btn, self.load_latest_btn, self.cancel_btn, self.preview_btn, self.export_clip_btn, self.export_selected_btn, self.thumb_selected_btn]:
+        for btn in [self.scan_btn, self.index_first_btn, self.index_all_btn, self.search_btn, self.load_latest_btn, self.cancel_btn, self.assemble_btn, self.preview_btn, self.export_clip_btn, self.export_selected_btn, self.thumb_selected_btn]:
             buttons.addWidget(btn)
         layout.addLayout(buttons)
 
@@ -365,6 +370,30 @@ class MainWindow(QMainWindow):
             on_result=lambda paths: self._after_thumbnail_export(paths, matches),
         )
 
+    def assemble_video(self) -> None:
+        if self.thread and self.thread.isRunning():
+            QMessageBox.warning(self, "任务进行中", "请等待当前任务完成。")
+            return
+        if not self.current_matches:
+            QMessageBox.information(self, "没有搜索结果", "请先搜索文案片段。")
+            return
+        output_dir = QFileDialog.getExistingDirectory(self, "选择组装导出目录", str(CONFIG.exports_dir / "assemblies"))
+        if not output_dir:
+            return
+        self.log("正在筛选最佳匹配并拼接视频…")
+        segments = pick_best_matches(self.current_matches, None)
+        if not segments:
+            self._show_error("没有足够的最佳匹配，无法组装。")
+            return
+        self._start_worker(
+            assemble_clips,
+            segments,
+            Path(output_dir),
+            "assembled",
+            progress="signal",
+            on_result=lambda result: self.log(f"拼接完成：{result.get('video_path', '?')}  字幕：{result.get('srt_path', '?')}"),
+        )
+
     def _after_export(self, paths, matches) -> None:
         for match, path in zip(matches, paths):
             match.status = MATCH_STATUS_EXPORTED
@@ -440,8 +469,9 @@ class MainWindow(QMainWindow):
         self.export_clip_btn.setEnabled((not busy) and has_matches)
         self.export_selected_btn.setEnabled((not busy) and has_matches)
         self.thumb_selected_btn.setEnabled((not busy) and has_matches)
+        self.assemble_btn.setEnabled((not busy) and has_matches)
         self.status_filter.setEnabled((not busy) and has_matches)
-        for btn in [self.mark_pending_btn, self.mark_usable_btn, self.mark_bad_btn, self.export_usable_btn, self.thumb_usable_btn, self.export_checklist_btn]:
+        for btn in [self.mark_pending_btn, self.mark_usable_btn, self.mark_bad_btn, self.export_usable_btn, self.thumb_usable_btn, self.export_checklist_btn, self.assemble_btn]:
             btn.setEnabled((not busy) and has_matches)
 
     @Slot(str)
