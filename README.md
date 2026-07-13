@@ -86,11 +86,28 @@ python main.py gui
 python scripts/build_exe.py
 ```
 
+打包脚本会使用正式 PyInstaller 配置文件：
+
+```text
+视频片段检索工具.spec
+```
+
 默认使用 PyInstaller onedir 模式，输出目录类似：
 
 ```text
 dist/视频片段检索工具/视频片段检索工具.exe
 ```
+
+打包版运行后会在 EXE 所在目录下自动创建运行时目录：
+
+```text
+data/
+cache/
+exports/
+logs/
+```
+
+其中 `data/settings.json` 会保存 GUI 最近选择的视频目录和脚本文案路径。FFmpeg 不会被打包进 EXE；目标机器仍需确保 `ffmpeg` 与 `ffprobe` 在 PATH 中可用。
 
 ## 重要说明
 
@@ -99,3 +116,4 @@ dist/视频片段检索工具/视频片段检索工具.exe
 - 已转写和索引的视频会缓存；视频文件、字幕来源或索引参数未变化时不会重复转写/导入。
 - 字幕优先级为：同名外挂文本字幕 → 内嵌文本字幕 → Whisper ASR；首版不支持 PGS/VobSub 等图片字幕 OCR，会自动回退 ASR。
 - 默认会递归扫描视频目录；如只想扫描第一层，可在 CLI 使用 `--no-recursive`。子目录中的同名外挂字幕也会被字幕优先索引识别。
+- GUI 首次启动时会使用通用默认路径；选择视频目录和脚本文案后，会自动保存到 `data/settings.json`，下次启动自动恢复。

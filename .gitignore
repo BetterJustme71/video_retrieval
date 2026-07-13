@@ -6,6 +6,7 @@ build/
 # cache & large data
 cache/
 data/app.db
+data/settings.json
 exports/
 
 # Python

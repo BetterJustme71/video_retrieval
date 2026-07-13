@@ -24,8 +24,8 @@ def _detect_root() -> Path:
 
 PROJECT_ROOT = _detect_root()
 
-DEFAULT_VIDEO_DIR = Path(r"E:\影视剧集")
-DEFAULT_SCRIPT_PATH = Path(r"D:\ClaudeCode_AI\闯关东\《闯关东》深度解析01：离乡不是选择，而是穷人最后的生路.md")
+DEFAULT_VIDEO_DIR = Path.home() / "Videos"
+DEFAULT_SCRIPT_PATH = Path.home() / "Documents"
 
 
 @dataclass(slots=True)
@@ -62,10 +62,6 @@ class AppConfig:
         (self.cache_dir / "embeddings").mkdir(parents=True, exist_ok=True)
         (self.cache_dir / "index").mkdir(parents=True, exist_ok=True)
 
-        # Copy an existing database from the source project directory
-        # so the packaged EXE finds the already-indexed data on first run.
-        _try_copy_legacy_db(self.db_path)
-
     def load_user_settings(self) -> dict[str, Any]:
         try:
             if not self.settings_path.exists():
@@ -85,7 +81,9 @@ class AppConfig:
             path = Path(str(value))
             if path.exists() and path.is_dir():
                 return path
-        return self.default_video_dir
+        if self.default_video_dir.exists() and self.default_video_dir.is_dir():
+            return self.default_video_dir
+        return self.project_root
 
     def get_default_script_path(self) -> Path:
         value = self.load_user_settings().get("script_path")
@@ -93,7 +91,9 @@ class AppConfig:
             path = Path(str(value))
             if path.exists() and path.is_file():
                 return path
-        return self.default_script_path
+        if self.default_script_path.exists():
+            return self.default_script_path
+        return self.project_root
 
     def save_recent_paths(self, video_dir: Path | None = None, script_path: Path | None = None) -> None:
         settings = self.load_user_settings()
@@ -106,29 +106,6 @@ class AppConfig:
             if script_path.exists() and script_path.is_file():
                 settings["script_path"] = str(script_path)
         self.save_user_settings(settings)
-
-
-def _try_copy_legacy_db(target: Path) -> None:
-    if target.exists() and target.stat().st_size > 4096:
-        return  # already has real data
-
-    # Known development project root on this machine
-    candidates = [
-        Path(r"E:\0_AI\Claude_影视检索") / "data" / "app.db",
-    ]
-    # If running in PyInstaller bundle, also try parents of sys.executable.
-    if getattr(sys, "frozen", False):
-        exe_parent = Path(sys.executable).resolve().parent.parent
-        candidates.append(exe_parent / "data" / "app.db")
-        candidates.append(exe_parent / ".." / "data" / "app.db")
-
-    import shutil
-    for src in candidates:
-        src = src.resolve()
-        if src.exists() and src.stat().st_size > 4096:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(src), str(target))
-            return
 
 
 CONFIG = AppConfig()
