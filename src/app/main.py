@@ -5,6 +5,7 @@ from pathlib import Path
 
 from src.app.config import CONFIG, AppConfig
 from src.core.assembler import assemble_clips, burn_subtitle
+from src.core.audio import AssemblyAudioOptions
 from src.core.best_match import pick_best_matches
 from src.core.clipper import export_clip
 from src.core.edit_list import export_editing_checklist
@@ -18,9 +19,6 @@ from src.core.script_parser import ScriptParser
 from src.core.timecode import ms_to_timecode
 from src.core.thumbnailer import export_thumbnail
 from src.core.transcriber import ensure_transcript
-from src.app.config import CONFIG, AppConfig
-from src.core.assembler import assemble_clips, burn_subtitle
-from src.core.best_match import pick_best_matches
 
 
 def init_db(config: AppConfig = CONFIG) -> Database:
@@ -189,6 +187,11 @@ def build_parser() -> argparse.ArgumentParser:
     assemble.add_argument("--run-id", type=int, default=None, help="使用已有搜索结果 run_id（不用重新搜索）")
     assemble.add_argument("--output-dir", type=Path, default=CONFIG.exports_dir / "assemblies", help="输出目录")
     assemble.add_argument("--name", type=str, default="assembled", help="输出文件名前缀")
+    assemble.add_argument("--tts", action="store_true", help="启用 Edge TTS 生成 AI 旁白")
+    assemble.add_argument("--tts-voice", type=str, default="zh-CN-XiaoxiaoNeural", help="Edge TTS 音色")
+    assemble.add_argument("--tts-rate", type=str, default="+0%", help="配音语速，例如 +0%% 或 --tts-rate=-5%%")
+    assemble.add_argument("--bgm", type=Path, default=None, help="背景音乐文件路径")
+    assemble.add_argument("--bgm-volume", type=bgm_volume_arg, default=0.15, help="BGM 音量，0.0 到 1.0")
 
     burn = sub.add_parser("burn-subtitle", help="将字幕文件烧录到视频中")
     burn.add_argument("--video", type=Path, required=True, help="视频文件路径")
@@ -202,6 +205,28 @@ def parse_episodes(value: str) -> list[int] | None:
     if value.strip().lower() in {"all", "*", "全部"}:
         return None
     return [int(item.strip()) for item in value.split(",") if item.strip()]
+
+
+def bgm_volume_arg(value: str) -> float:
+    try:
+        volume = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("BGM 音量必须是 0.0 到 1.0 之间的数字。") from exc
+    if not 0 <= volume <= 1:
+        raise argparse.ArgumentTypeError("BGM 音量必须在 0.0 到 1.0 之间。")
+    return volume
+
+
+def normalize_tts_rate(value: str) -> str:
+    rate = value.strip()
+    if not rate:
+        return "+0%"
+    if rate.endswith("%") and rate[0] in {"+", "-"}:
+        return rate
+    if rate.lstrip("+-").isdigit():
+        number = int(rate)
+        return f"{number:+d}%"
+    return rate
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -268,9 +293,20 @@ def main(argv: list[str] | None = None) -> int:
         if not segments:
             print("没有足够的最佳匹配，无法组装。")
             return 1
-        result = assemble_clips(segments, args.output_dir, args.name, progress=print)
+        audio_options = AssemblyAudioOptions(
+            tts_enabled=args.tts,
+            tts_voice=args.tts_voice,
+            tts_rate=normalize_tts_rate(args.tts_rate),
+            bgm_path=args.bgm,
+            bgm_volume=args.bgm_volume,
+        )
+        result = assemble_clips(segments, args.output_dir, args.name, progress=print, audio_options=audio_options)
         print(f"组装完成：{result['video_path']}")
         print(f"字幕文件：{result['srt_path']}")
+        if result.get("narration_path"):
+            print(f"旁白音频：{result['narration_path']}")
+        if result.get("bgm_path"):
+            print(f"背景音乐：{result['bgm_path']}")
         print(f"片段数：{result['clip_count']}，总时长：{result['duration_ms']}ms")
         return 0
     if command == "burn_subtitle" or command == "burn-subtitle":
@@ -280,3 +316,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     parser.print_help()
     return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

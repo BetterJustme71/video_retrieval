@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from collections.abc import Sequence
 from src.core.models import SearchMatch
 
 SRT_TEMPLATE = "{idx}\n{start} --> {end}\n{text}\n\n"
@@ -23,11 +24,19 @@ def text_duration_ms(text: str) -> int:
     return max(2000, min(15000, calculated))
 
 
-def generate_srt(segments: list[tuple[SearchMatch, str]]) -> str:
+def generate_srt(segments: list[tuple[SearchMatch, str]], durations_ms: Sequence[int] | None = None) -> str:
+    if durations_ms is not None:
+        if len(durations_ms) != len(segments):
+            raise ValueError("字幕时长数量与片段数量不一致。")
+        durations = [int(duration) for duration in durations_ms]
+        if any(duration <= 0 for duration in durations):
+            raise ValueError("字幕时长必须大于 0。")
+    else:
+        durations = [text_duration_ms(text) for _match, text in segments]
+
     offset = 0
     parts: list[str] = []
-    for idx, (_match, text) in enumerate(segments, start=1):
-        duration = text_duration_ms(text)
+    for idx, ((_match, text), duration) in enumerate(zip(segments, durations), start=1):
         seg_start = offset
         seg_end = offset + duration
         parts.append(

@@ -41,6 +41,8 @@ def main() -> int:
     for package in ["sentence_transformers", "hnswlib"]:
         ok, msg = check_import(package)
         checks.append((True, ("可选：" + msg) if ok else ("可选：" + msg + "（MVP 可先用文本相似度 fallback）")))
+    ok, msg = check_import("edge_tts")
+    checks.append((True, ("可选：" + msg) if ok else ("可选：" + msg + "（缺少时 AI 旁白不可用）")))
 
     failed = False
     for ok, msg in checks:

@@ -6,9 +6,11 @@ from typing import Callable
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -27,6 +29,7 @@ from PySide6.QtWidgets import (
 from src.app.config import CONFIG
 from src.app.main import index_videos, load_latest_search_results, scan_videos, search_script, update_search_match_statuses
 from src.core.assembler import assemble_clips
+from src.core.audio import AssemblyAudioOptions
 from src.core.best_match import pick_best_matches
 from src.core.clipper import export_clip, export_clips, open_match_preview
 from src.core.edit_list import export_editing_checklist
@@ -94,6 +97,52 @@ class MainWindow(QMainWindow):
         path_grid.addWidget(self.script_edit, 1, 1)
         path_grid.addWidget(script_btn, 1, 2)
         layout.addLayout(path_grid)
+
+        audio_settings = CONFIG.get_assembly_audio_settings()
+        audio_group = QGroupBox("组装音频")
+        audio_layout = QGridLayout(audio_group)
+        self.tts_enabled_check = QCheckBox("生成 AI 旁白")
+        self.tts_enabled_check.setChecked(bool(audio_settings["tts_enabled"]))
+        self.tts_voice_combo = QComboBox()
+        self.tts_voice_combo.setEditable(True)
+        self.tts_voice_combo.addItems([
+            "zh-CN-XiaoxiaoNeural",
+            "zh-CN-YunxiNeural",
+            "zh-CN-YunjianNeural",
+            "zh-CN-XiaoyiNeural",
+            "zh-CN-YunyangNeural",
+        ])
+        self.tts_voice_combo.setCurrentText(str(audio_settings["tts_voice"]))
+        self.tts_rate_spin = QSpinBox()
+        self.tts_rate_spin.setRange(-50, 100)
+        self.tts_rate_spin.setSuffix("%")
+        self.tts_rate_spin.setValue(int(audio_settings["tts_rate"]))
+        self.bgm_enabled_check = QCheckBox("混入背景音乐")
+        self.bgm_enabled_check.setChecked(bool(audio_settings["bgm_enabled"]))
+        self.bgm_path_edit = QLineEdit(str(audio_settings["bgm_path"]))
+        self.bgm_btn = QPushButton("选择 BGM")
+        self.bgm_clear_btn = QPushButton("清空")
+        self.bgm_volume_spin = QSpinBox()
+        self.bgm_volume_spin.setRange(0, 100)
+        self.bgm_volume_spin.setSuffix("%")
+        self.bgm_volume_spin.setValue(int(audio_settings["bgm_volume_percent"]))
+        self.bgm_btn.clicked.connect(self.choose_bgm)
+        self.bgm_clear_btn.clicked.connect(self.clear_bgm)
+        self.tts_enabled_check.toggled.connect(self._update_audio_controls)
+        self.bgm_enabled_check.toggled.connect(self._update_audio_controls)
+        audio_layout.addWidget(self.tts_enabled_check, 0, 0)
+        audio_layout.addWidget(QLabel("音色"), 0, 1)
+        audio_layout.addWidget(self.tts_voice_combo, 0, 2)
+        audio_layout.addWidget(QLabel("语速"), 0, 3)
+        audio_layout.addWidget(self.tts_rate_spin, 0, 4)
+        audio_layout.addWidget(self.bgm_enabled_check, 1, 0)
+        audio_layout.addWidget(self.bgm_path_edit, 1, 1, 1, 2)
+        audio_layout.addWidget(self.bgm_btn, 1, 3)
+        audio_layout.addWidget(self.bgm_clear_btn, 1, 4)
+        audio_layout.addWidget(QLabel("BGM 音量"), 1, 5)
+        audio_layout.addWidget(self.bgm_volume_spin, 1, 6)
+        layout.addWidget(audio_group)
+        self._update_audio_controls()
 
         buttons = QHBoxLayout()
         self.top_k_spin = QSpinBox()
@@ -186,6 +235,55 @@ class MainWindow(QMainWindow):
         if selected:
             self.script_edit.setText(selected)
             CONFIG.save_recent_paths(video_dir=Path(self.video_dir_edit.text()), script_path=Path(selected))
+
+    def choose_bgm(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(self, "选择背景音乐", self.bgm_path_edit.text() or str(CONFIG.project_root), "Audio Files (*.mp3 *.wav *.m4a *.aac *.flac *.ogg);;All Files (*)")
+        if selected:
+            self.bgm_path_edit.setText(selected)
+            self.bgm_enabled_check.setChecked(True)
+            self._save_audio_settings()
+
+    def clear_bgm(self) -> None:
+        self.bgm_path_edit.clear()
+        self.bgm_enabled_check.setChecked(False)
+        self._save_audio_settings()
+
+    def _rate_text(self) -> str:
+        return f"{self.tts_rate_spin.value():+d}%"
+
+    def _save_audio_settings(self) -> None:
+        CONFIG.save_assembly_audio_settings(
+            tts_enabled=self.tts_enabled_check.isChecked(),
+            tts_voice=self.tts_voice_combo.currentText(),
+            tts_rate=self.tts_rate_spin.value(),
+            bgm_enabled=self.bgm_enabled_check.isChecked(),
+            bgm_path=self.bgm_path_edit.text(),
+            bgm_volume_percent=self.bgm_volume_spin.value(),
+        )
+
+    def _build_audio_options(self) -> AssemblyAudioOptions:
+        if self.bgm_enabled_check.isChecked() and not self.bgm_path_edit.text().strip():
+            raise ValueError("已勾选混入背景音乐，请先选择 BGM 文件。")
+        bgm_path = Path(self.bgm_path_edit.text()) if self.bgm_enabled_check.isChecked() and self.bgm_path_edit.text().strip() else None
+        options = AssemblyAudioOptions(
+            tts_enabled=self.tts_enabled_check.isChecked(),
+            tts_voice=self.tts_voice_combo.currentText(),
+            tts_rate=self._rate_text(),
+            bgm_path=bgm_path,
+            bgm_volume=self.bgm_volume_spin.value() / 100,
+        )
+        options.validate()
+        return options
+
+    def _update_audio_controls(self) -> None:
+        tts_enabled = self.tts_enabled_check.isChecked()
+        bgm_enabled = self.bgm_enabled_check.isChecked()
+        self.tts_voice_combo.setEnabled(tts_enabled)
+        self.tts_rate_spin.setEnabled(tts_enabled)
+        self.bgm_path_edit.setEnabled(bgm_enabled)
+        self.bgm_btn.setEnabled(bgm_enabled)
+        self.bgm_clear_btn.setEnabled(bgm_enabled or bool(self.bgm_path_edit.text().strip()))
+        self.bgm_volume_spin.setEnabled(bgm_enabled)
 
     def _save_current_paths(self) -> None:
         CONFIG.save_recent_paths(video_dir=Path(self.video_dir_edit.text()), script_path=Path(self.script_edit.text()))
@@ -380,6 +478,12 @@ class MainWindow(QMainWindow):
         output_dir = QFileDialog.getExistingDirectory(self, "选择组装导出目录", str(CONFIG.exports_dir / "assemblies"))
         if not output_dir:
             return
+        try:
+            audio_options = self._build_audio_options()
+        except Exception as exc:
+            self._show_error(str(exc))
+            return
+        self._save_audio_settings()
         self.log("正在筛选最佳匹配并拼接视频…")
         segments = pick_best_matches(self.current_matches, None)
         if not segments:
@@ -391,6 +495,7 @@ class MainWindow(QMainWindow):
             Path(output_dir),
             "assembled",
             progress="signal",
+            audio_options=audio_options,
             on_result=lambda result: self.log(f"拼接完成：{result.get('video_path', '?')}  字幕：{result.get('srt_path', '?')}"),
         )
 
@@ -464,6 +569,20 @@ class MainWindow(QMainWindow):
             btn.setEnabled(not busy)
         self.cancel_btn.setEnabled(busy)
         self.top_k_spin.setEnabled(not busy)
+        audio_controls = [
+            self.tts_enabled_check,
+            self.tts_voice_combo,
+            self.tts_rate_spin,
+            self.bgm_enabled_check,
+            self.bgm_path_edit,
+            self.bgm_btn,
+            self.bgm_clear_btn,
+            self.bgm_volume_spin,
+        ]
+        for control in audio_controls:
+            control.setEnabled(not busy)
+        if not busy:
+            self._update_audio_controls()
         has_matches = bool(self.current_matches)
         self.preview_btn.setEnabled((not busy) and has_matches)
         self.export_clip_btn.setEnabled((not busy) and has_matches)
@@ -561,6 +680,7 @@ class MainWindow(QMainWindow):
         self.log(f"搜索完成：{len(matches)} 条候选。CSV: {csv_path} JSON: {json_path}")
 
     def closeEvent(self, event) -> None:
+        self._save_audio_settings()
         if self.thread and self.thread.isRunning():
             self.thread.quit()
             self.thread.wait(3000)

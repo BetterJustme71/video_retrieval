@@ -107,5 +107,52 @@ class AppConfig:
                 settings["script_path"] = str(script_path)
         self.save_user_settings(settings)
 
+    def get_assembly_audio_settings(self) -> dict[str, Any]:
+        raw = self.load_user_settings().get("assembly_audio")
+        data = raw if isinstance(raw, dict) else {}
+
+        def as_bool(key: str, default: bool) -> bool:
+            value = data.get(key, default)
+            return value if isinstance(value, bool) else default
+
+        def as_int(key: str, default: int, low: int, high: int) -> int:
+            try:
+                value = int(data.get(key, default))
+            except (TypeError, ValueError):
+                return default
+            return max(low, min(high, value))
+
+        voice = data.get("tts_voice", "zh-CN-XiaoxiaoNeural")
+        bgm_path = data.get("bgm_path", "")
+        return {
+            "tts_enabled": as_bool("tts_enabled", False),
+            "tts_voice": str(voice).strip() or "zh-CN-XiaoxiaoNeural",
+            "tts_rate": as_int("tts_rate", 0, -50, 100),
+            "bgm_enabled": as_bool("bgm_enabled", False),
+            "bgm_path": str(bgm_path) if bgm_path is not None else "",
+            "bgm_volume_percent": as_int("bgm_volume_percent", 15, 0, 100),
+        }
+
+    def save_assembly_audio_settings(
+        self,
+        *,
+        tts_enabled: bool,
+        tts_voice: str,
+        tts_rate: int,
+        bgm_enabled: bool,
+        bgm_path: str,
+        bgm_volume_percent: int,
+    ) -> None:
+        settings = self.load_user_settings()
+        settings["assembly_audio"] = {
+            "tts_enabled": bool(tts_enabled),
+            "tts_voice": str(tts_voice).strip() or "zh-CN-XiaoxiaoNeural",
+            "tts_rate": max(-50, min(100, int(tts_rate))),
+            "bgm_enabled": bool(bgm_enabled),
+            "bgm_path": str(bgm_path).strip(),
+            "bgm_volume_percent": max(0, min(100, int(bgm_volume_percent))),
+        }
+        self.save_user_settings(settings)
+
 
 CONFIG = AppConfig()

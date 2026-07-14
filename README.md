@@ -20,6 +20,8 @@
 - 输出候选片段表，并导出 CSV/JSON
 - 选中候选结果后可用 `ffplay` 预览对应时间点
 - 选中候选结果后可用 FFmpeg 导出短视频片段
+- 可自动组装最佳匹配片段，输出连贯视频和 SRT 字幕
+- 组装时可选 Edge TTS 生成 AI 旁白，并可混入本地背景音乐 BGM
 - 可为候选片段生成 JPG 缩略图，并写入剪辑清单
 - 提供 PySide6 桌面 GUI 和命令行入口
 
@@ -74,7 +76,44 @@ python main.py search --script "D:\ClaudeCode_AI\闯关东\《闯关东》深度
 python main.py clip --script "D:\ClaudeCode_AI\闯关东\《闯关东》深度解析01：离乡不是选择，而是穷人最后的生路.md" --top-k 1 --limit 1 --output-dir exports/clips
 ```
 
-### 6. 启动 GUI
+### 6. 自动组装视频、AI 旁白和 BGM
+
+使用已有搜索结果组装：
+
+```bash
+python main.py assemble --run-id 1 --output-dir exports/assemblies --name assembled
+```
+
+启用 Edge TTS 生成 AI 旁白：
+
+```bash
+python main.py assemble --run-id 1 --tts --tts-voice zh-CN-XiaoxiaoNeural --tts-rate=-5%
+```
+
+混入本地背景音乐：
+
+```bash
+python main.py assemble --run-id 1 --bgm "D:\Music\background.mp3" --bgm-volume 0.12
+```
+
+同时启用旁白和 BGM：
+
+```bash
+python main.py assemble --run-id 1 --tts --bgm "D:\Music\background.mp3" --bgm-volume 0.10
+```
+
+输出目录中会生成：
+
+```text
+assembled.mp4          # 最终视频
+assembled.srt          # 字幕文件
+assembled_clips/       # 中间片段
+assembled_audio/       # AI 旁白中间音频（启用 TTS 时）
+```
+
+音频规则：未启用 TTS/BGM 时保持原片音轨；只启用 TTS 时用 AI 旁白替换原声；只启用 BGM 时与原视频音频混合；TTS+BGM 时旁白为主、BGM 低音量混入。BGM 会自动循环或裁剪到最终视频时长。
+
+### 7. 启动 GUI
 
 ```bash
 python main.py gui
@@ -111,7 +150,9 @@ logs/
 
 ## 重要说明
 
-- 本工具默认本地运行，不上传视频和文案。
+- 本工具默认本地运行；未启用 AI 旁白时，不上传视频和文案。启用 Edge TTS 旁白时，旁白文本会发送到 Microsoft 在线语音服务；视频文件和本地 BGM 不会被该集成上传。
+- Edge TTS 需要联网；如果网络不可用或音色无效，启用旁白的组装任务会失败并提示错误。
+- 使用本地 BGM 时，请自行确认音乐版权和平台使用授权。
 - 当前 MVP 主要依赖 ASR 转写文本检索。对于“风雪、老屋、饭桌”等纯画面描述，首版命中能力会弱于人物/剧情/对白类查询。
 - 已转写和索引的视频会缓存；视频文件、字幕来源或索引参数未变化时不会重复转写/导入。
 - 字幕优先级为：同名外挂文本字幕 → 内嵌文本字幕 → Whisper ASR；首版不支持 PGS/VobSub 等图片字幕 OCR，会自动回退 ASR。

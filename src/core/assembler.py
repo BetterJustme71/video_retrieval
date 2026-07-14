@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Callable
 
+from src.core.audio import AssemblyAudioOptions, finalize_audio, probe_duration_ms, synthesize_narration
 from src.core.models import SearchMatch
 from src.core.subtitle import generate_srt, save_srt, segment_durations
 from src.core.timecode import ms_to_timecode
@@ -19,9 +21,186 @@ def ffmpeg_time(ms: int) -> str:
 
 
 def safe_filename(text: str, max_len: int = 80) -> str:
-    text = re.sub(r"[\\/:*?\"<>|\r\n\t]+", "_", text)
+    text = re.sub(r"[\\\/:*?\"<>|\r\n\t]+", "_", text)
     text = re.sub(r"\s+", " ", text).strip()
-    return text or "clip"
+    return (text or "clip")[:max_len]
+
+
+def _concat_manifest_line(path: Path) -> str:
+    normalized = path.resolve().as_posix().replace("'", "\\'")
+    return f"file '{normalized}'"
+
+
+def _replace_file(source: Path, target: Path) -> None:
+    backup: Path | None = None
+    if target.exists():
+        backup = target.with_suffix(target.suffix + ".bak")
+        os.replace(target, backup)
+    try:
+        os.replace(source, target)
+    except Exception:
+        if backup is not None:
+            os.replace(backup, target)
+        raise
+    if backup is not None:
+        backup.unlink(missing_ok=True)
+
+
+def _export_timed_visual_clip(
+    match: SearchMatch,
+    clip_path: Path,
+    duration_ms: int,
+    progress: ProgressCallback,
+) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("未找到 ffmpeg，请先安装 FFmpeg 并加入 PATH。")
+    video_path = Path(match.video_path)
+    if not video_path.exists():
+        raise FileNotFoundError(f"视频文件不存在：{video_path}")
+    start_ms = match.preview_start_ms if match.preview_start_ms else match.start_ms
+    duration_s = max(0.001, duration_ms / 1000)
+    filter_complex = (
+        f"[0:v]setpts=PTS-STARTPTS,"
+        f"tpad=stop_mode=clone:stop_duration={duration_s:.3f},"
+        f"trim=duration={duration_s:.3f},"
+        "setpts=PTS-STARTPTS[v]"
+    )
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-ss",
+        ffmpeg_time(start_ms),
+        "-i",
+        str(video_path),
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "[v]",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "22",
+        "-pix_fmt",
+        "yuv420p",
+        "-t",
+        f"{duration_s:.3f}",
+        str(clip_path),
+    ]
+    completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", check=False)
+    if completed.returncode != 0:
+        raise RuntimeError(f"按配音时长截取失败：{clip_path.name} {completed.stderr.strip()}")
+    try:
+        actual_ms = probe_duration_ms(clip_path)
+    except Exception as exc:
+        raise RuntimeError(f"无法验证片段时长：{clip_path.name} {exc}") from exc
+    if abs(actual_ms - duration_ms) > 250:
+        progress(f"警告：{clip_path.name} 时长与配音相差 {abs(actual_ms - duration_ms)}ms")
+
+
+def _export_legacy_assembly_clip(
+    match: SearchMatch,
+    clip_path: Path,
+    duration_ms: int,
+    progress: ProgressCallback,
+) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("未找到 ffmpeg，请先安装 FFmpeg 并加入 PATH。")
+    start_ms = match.preview_start_ms if match.preview_start_ms else match.start_ms
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-ss",
+        ffmpeg_time(start_ms),
+        "-i",
+        str(Path(match.video_path)),
+        "-t",
+        ffmpeg_time(duration_ms),
+        "-c",
+        "copy",
+        "-avoid_negative_ts",
+        "make_zero",
+        str(clip_path),
+    ]
+    completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", check=False)
+    if completed.returncode != 0:
+        progress(f"重编码截取：{clip_path.name}")
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-ss",
+            ffmpeg_time(start_ms),
+            "-i",
+            str(Path(match.video_path)),
+            "-t",
+            ffmpeg_time(duration_ms),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "22",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
+            str(clip_path),
+        ]
+        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", check=False)
+        if completed.returncode != 0:
+            raise RuntimeError(f"截取失败：{clip_path.name} {completed.stderr.strip()}")
+
+
+def _concat_clips(clip_paths: list[Path], concat_txt: Path, video_path: Path, progress: ProgressCallback) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("未找到 ffmpeg，请先安装 FFmpeg 并加入 PATH。")
+    concat_txt.write_text("\n".join(_concat_manifest_line(p) for p in clip_paths), encoding="utf-8")
+    progress("拼接片段…")
+    concat_cmd = [
+        ffmpeg,
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_txt),
+        "-c",
+        "copy",
+        str(video_path),
+    ]
+    completed = subprocess.run(concat_cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", check=False)
+    if completed.returncode != 0:
+        progress(f"流复制拼接失败，改用重编码拼接：{completed.stderr.strip()}")
+        concat_cmd = [
+            ffmpeg,
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_txt),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "22",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
+            str(video_path),
+        ]
+        completed = subprocess.run(concat_cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", check=False)
+        if completed.returncode != 0:
+            raise RuntimeError(f"拼接失败：{completed.stderr.strip()}")
 
 
 def export_clip(
@@ -101,120 +280,77 @@ def assemble_clips(
     output_dir: Path,
     name: str,
     progress: ProgressCallback | None = None,
+    audio_options: AssemblyAudioOptions | None = None,
 ) -> dict:
     progress = progress or (lambda _message: None)
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("未找到 ffmpeg，请先安装 FFmpeg 并加入 PATH。")
+    if not segments:
+        raise ValueError("没有可组装的片段。")
+
+    audio_options = audio_options or AssemblyAudioOptions()
+    audio_options.validate()
     output_dir.mkdir(parents=True, exist_ok=True)
     clips_dir = output_dir / f"{name}_clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
-    clip_paths: list[Path] = []
-    durations = segment_durations(segments)
+    audio_dir = output_dir / f"{name}_audio"
+    narration = None
+
+    if audio_options.tts_enabled:
+        narration = synthesize_narration([text for _match, text in segments], audio_dir, audio_options, progress=progress)
+        durations = narration.segment_durations_ms
+    else:
+        durations = segment_durations(segments)
+
     total_duration_ms = sum(durations)
-    for idx, (match, text) in enumerate(segments):
+    clip_paths: list[Path] = []
+    for idx, (match, _text) in enumerate(segments):
         seg_duration = durations[idx]
         clip_name = f"Q{idx:03d}.mp4"
         clip_path = clips_dir / clip_name
-        start_ms = match.preview_start_ms if match.preview_start_ms else match.start_ms
-        cmd = [
-            ffmpeg,
-            "-y",
-            "-ss",
-            ffmpeg_time(start_ms),
-            "-i",
-            str(Path(match.video_path)),
-            "-t",
-            ffmpeg_time(seg_duration),
-            "-c",
-            "copy",
-            "-avoid_negative_ts",
-            "make_zero",
-            str(clip_path),
-        ]
         progress(f"截取片段 {idx+1}/{len(segments)}：{clip_name}")
-        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", check=False)
-        if completed.returncode != 0:
-            progress(f"重编码截取：{clip_name}")
-            cmd = [
-                ffmpeg,
-                "-y",
-                "-ss",
-                ffmpeg_time(start_ms),
-                "-i",
-                str(Path(match.video_path)),
-                "-t",
-                ffmpeg_time(seg_duration),
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "22",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "160k",
-                str(clip_path),
-            ]
-            completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", check=False)
-            if completed.returncode != 0:
-                raise RuntimeError(f"截取失败：{clip_name} {completed.stderr.strip()}")
+        if audio_options.tts_enabled:
+            _export_timed_visual_clip(match, clip_path, seg_duration, progress)
+        else:
+            _export_legacy_assembly_clip(match, clip_path, seg_duration, progress)
         clip_paths.append(clip_path)
+
     concat_txt = output_dir / f"{name}_concat.txt"
-    concat_txt.write_text("\n".join(f"file '{p.resolve()}'" for p in clip_paths), encoding="utf-8")
-    video_path = output_dir / f"{name}.mp4"
-    progress("拼接片段…")
-    concat_cmd = [
-        ffmpeg,
-        "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(concat_txt),
-        "-c",
-        "copy",
-        str(video_path),
-    ]
-    completed = subprocess.run(concat_cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", check=False)
-    if completed.returncode != 0:
-        progress(f"流复制拼接失败，改用重编码拼接：{completed.stderr.strip()}")
-        concat_cmd = [
-            ffmpeg,
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(concat_txt),
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "22",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "160k",
-            str(video_path),
-        ]
-        completed = subprocess.run(concat_cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", check=False)
-        if completed.returncode != 0:
-            raise RuntimeError(f"拼接失败：{completed.stderr.strip()}")
-    srt_text = generate_srt(segments)
+    final_video_path = output_dir / f"{name}.mp4"
+    base_video_path = output_dir / f"{name}_base.mp4" if audio_options.enabled else final_video_path
+    _concat_clips(clip_paths, concat_txt, base_video_path, progress)
+
+    if audio_options.enabled:
+        mixed_path = output_dir / f"{name}_mixed.mp4"
+        if audio_options.tts_enabled:
+            final_duration_ms = total_duration_ms
+        else:
+            actual_ms = probe_duration_ms(base_video_path)
+            final_duration_ms = max(total_duration_ms, actual_ms)
+        finalize_audio(
+            base_video_path,
+            mixed_path,
+            final_duration_ms,
+            narration.narration_path if narration is not None else None,
+            audio_options,
+            progress=progress,
+        )
+        _replace_file(mixed_path, final_video_path)
+
+    srt_text = generate_srt(segments, durations)
     srt_path = output_dir / f"{name}.srt"
     save_srt(srt_text, srt_path)
-    progress(f"拼接完成：{video_path}")
+    progress(f"拼接完成：{final_video_path}")
     progress(f"字幕文件：{srt_path}")
     return {
-        "video_path": str(video_path),
+        "video_path": str(final_video_path),
         "srt_path": str(srt_path),
         "clip_count": len(clip_paths),
         "duration_ms": total_duration_ms,
+        "tts_enabled": audio_options.tts_enabled,
+        "narration_path": str(narration.narration_path) if narration is not None else None,
+        "bgm_path": str(audio_options.bgm_path) if audio_options.bgm_path is not None else None,
     }
 
 
